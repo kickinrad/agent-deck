@@ -1,14 +1,117 @@
-// e2e/service-worker-recovery.spec.js -- network-loss recovery through the
-// production service worker. EventSource only retries network failures; a
-// synthetic HTTP error permanently closes the stream.
+// e2e/service-worker-recovery.spec.js -- shell upgrades and network-loss
+// recovery through the production service worker. EventSource only retries
+// network failures; a synthetic HTTP error permanently closes the stream.
 
 import { test, expect } from '@playwright/test'
+import { readFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
 
 const RECOVERED_TITLE = 'recovered-after-offline'
 const OLD_SERVICE_WORKER = `
 self.addEventListener('install', () => self.skipWaiting())
 self.addEventListener('activate', event => event.waitUntil(self.clients.claim()))
 `
+
+test.describe('service worker shell upgrades', () => {
+  test('replaces a cached bundle when the deployed worker changes cache version', async ({ page }) => {
+    const productionWorker = await readFile(
+      new URL('../../../internal/web/static/sw.js', import.meta.url),
+      'utf8',
+    )
+    const currentBundle = await readFile(
+      new URL('../../../internal/web/static/app/main.js', import.meta.url),
+      'utf8',
+    )
+
+    // Model the previously deployed worker from the production source. Before
+    // the cache version changes this is byte-identical, so update() cannot run
+    // install/activate and the stale cache remains in control.
+    let workerSource = productionWorker.replace(/agentdeck-shell-v\d+/, 'agentdeck-shell-v9')
+    let bundleSource = '/* stale agent-deck bundle */'
+    const server = createServer((req, res) => {
+      const pathname = new URL(req.url, 'http://127.0.0.1').pathname
+      res.setHeader('Cache-Control', 'no-store')
+      switch (pathname) {
+        case '/sw.js':
+          res.setHeader('Content-Type', 'application/javascript; charset=utf-8')
+          res.setHeader('Service-Worker-Allowed', '/')
+          res.end(workerSource)
+          return
+        case '/':
+        case '/static/index.html':
+          res.setHeader('Content-Type', 'text/html; charset=utf-8')
+          res.end('<!doctype html><title>Agent Deck cache upgrade fixture</title>')
+          return
+        case '/manifest.webmanifest':
+          res.setHeader('Content-Type', 'application/manifest+json')
+          res.end('{}')
+          return
+        case '/static/app/main.js':
+          res.setHeader('Content-Type', 'application/javascript; charset=utf-8')
+          res.end(bundleSource)
+          return
+        case '/static/styles.css':
+          res.setHeader('Content-Type', 'text/css')
+          res.end('')
+          return
+        case '/static/icons/logo.svg':
+          res.setHeader('Content-Type', 'image/svg+xml')
+          res.end('<svg xmlns="http://www.w3.org/2000/svg"/>')
+          return
+        default:
+          res.statusCode = 404
+          res.end('not found')
+      }
+    })
+    await new Promise((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', resolve)
+    })
+    const { port } = server.address()
+
+    try {
+      await page.goto(`http://127.0.0.1:${port}/`)
+      await page.evaluate(async () => {
+        await navigator.serviceWorker.register('/sw.js', { scope: '/' })
+        await navigator.serviceWorker.ready
+      })
+      await page.waitForFunction(() => navigator.serviceWorker.controller !== null)
+
+      expect(await page.evaluate(async () => {
+        const response = await fetch('/static/app/main.js')
+        return response.text()
+      })).toBe(bundleSource)
+
+      workerSource = productionWorker
+      bundleSource = currentBundle
+      await page.evaluate(async () => {
+        const registration = await navigator.serviceWorker.getRegistration('/')
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('service worker update timed out')), 10000)
+          navigator.serviceWorker.addEventListener('controllerchange', () => {
+            clearTimeout(timeout)
+            resolve()
+          }, { once: true })
+          registration.update().catch(reject)
+        })
+      })
+      await page.reload()
+
+      const upgraded = await page.evaluate(async () => {
+        const response = await fetch('/static/app/main.js')
+        return {
+          bundle: await response.text(),
+          cacheNames: await caches.keys(),
+        }
+      })
+      expect(upgraded.bundle).toBe(currentBundle)
+      expect(upgraded.cacheNames).toContain('agentdeck-shell-v10')
+      expect(upgraded.cacheNames).not.toContain('agentdeck-shell-v9')
+    } finally {
+      await new Promise((resolve) => server.close(resolve))
+    }
+  })
+})
 
 test.describe('service worker SSE recovery', () => {
   test.beforeEach(async ({ request }) => {
