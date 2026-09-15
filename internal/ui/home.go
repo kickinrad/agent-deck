@@ -238,6 +238,7 @@ type Home struct {
 	instances          []*session.Instance
 	instanceByID       map[string]*session.Instance // O(1) instance lookup by ID
 	instancesMu        sync.RWMutex                 // Protects instances slice for thread-safe background access
+	switchGenerations  map[string]uint64            // owns async harness-switch completions per instance
 	storage            *session.Storage
 	groupTree          *session.GroupTree
 	flatItems          []session.Item // Flattened view for cursor navigation
@@ -335,6 +336,7 @@ type Home struct {
 	isReloading         bool       // Visual feedback during auto-reload
 	initialLoading      bool       // True until first loadSessionsMsg received (shows splash screen)
 	isQuitting          bool       // True when user pressed q, shows quitting splash
+	restartRequested    bool       // True when the quit sequence should end in an in-place exec (restart.go)
 	reloadVersion       uint64     // Incremented on each reload to prevent stale background saves
 	reloadMu            sync.Mutex // Protects reloadVersion, isReloading, and lastLoadMtime for thread-safe access
 	lastLoadMtime       time.Time  // File mtime when we last loaded (for external change detection)
@@ -467,9 +469,48 @@ type Home struct {
 	// Update notification (async check on startup, periodic re-check)
 	updateInfo      *update.UpdateInfo
 	lastUpdateCheck time.Time
+	// lastUpdateCheckFailed holds the periodic check back for
+	// update.RecheckBackoff; updateCheckInFlight keeps it to one at a time.
+	lastUpdateCheckFailed bool
+	updateCheckInFlight   bool
 	// updateNudgeDismissed suppresses the >5-releases-behind nudge for
 	// the rest of the process. Reset on restart. Conductor task #45.
 	updateNudgeDismissed bool
+	// binaryWatch notices when the executable on disk is replaced by a
+	// newer release while the TUI runs (see binary_watch.go). Nil when the
+	// executable could not be resolved at startup.
+	binaryWatch *binaryWatch
+	// homebrewManaged is cached once at startup: a Homebrew binary is never
+	// installed over by the TUI (brew owns it). See update_auto.go.
+	homebrewManaged bool
+	// autoInstallInFlight is the version an unattended install is running
+	// for ("" when none); autoInstallAttempts is when each version was last
+	// tried, so a failure is not retried every check.
+	autoInstallInFlight string
+	autoInstallAttempts map[string]time.Time
+	// binaryOrphanReason is set while the executable this process started
+	// from is gone or in the Trash: the deck cannot update or restart
+	// itself then, says so in the banner, and both auto paths stay off.
+	binaryOrphanReason string
+	// binaryExecPath is os.Executable() at startup, kept even when the
+	// file could not be fingerprinted then, so a later tick can start the
+	// watch once the path is back.
+	binaryExecPath string
+	// autoInstallLastSkip is the last reason the periodic check left the
+	// updater alone, so the log says it once per change, not per minute.
+	autoInstallLastSkip string
+	// autoRestartLoggedAt rate-limits the "waiting for idle" log line.
+	autoRestartLoggedAt time.Time
+	// autoRestartHoldUntil pauses the auto path after the pre-arm check of
+	// the new binary failed (see restartTargetProblem).
+	autoRestartHoldUntil time.Time
+	// autoUpdateSuppressedReason is non-empty when neither auto_install nor
+	// auto_restart may act in this process (go test, CI, skip env, test
+	// markers, no terminal; issue #2251). Set once in Init.
+	autoUpdateSuppressedReason string
+	// restartHandoff is what the previous process left in the environment
+	// when it exec'd this one (restart.go); applied after the first load.
+	restartHandoff RestartHandoff
 
 	// Launching animation state (for newly created sessions)
 	launchingSessions    map[string]time.Time        // sessionID -> creation time
@@ -515,6 +556,8 @@ type Home struct {
 	navigationHotUntil atomic.Int64
 	// Snapshot of status/tool used by render path to avoid per-row lock contention.
 	sessionRenderSnapshot atomic.Value // map[string]sessionRenderState
+	// Serializes snapshot publication with account gate transitions. Readers stay lock-free.
+	sessionRenderSnapshotMu sync.Mutex
 
 	// Jump mode (vimium-style hint navigation)
 	jumpMode   bool   // True when jump mode is active
@@ -554,6 +597,16 @@ type Home struct {
 	// description) suffix on every session row instead of only the selected
 	// one. Cached here so all rows of a frame agree; reloaded after panel save.
 	showPaneTitles bool
+
+	// accountSlotsConfigured mirrors len(session.ConfiguredAccountNames(cfg)) > 0,
+	// the same gate the New/Edit Session dialogs use to hide their account rows
+	// (#2152). A machine with no [profiles.<name>.claude].config_dir block has
+	// one login, so "which slot is this session on" is not a question that can
+	// have two answers — the inherited badge would be dead width on every row.
+	// Atomic because refreshSessionRenderSnapshot reads it from the background
+	// refresher goroutine while the settings panel writes it from the Bubble Tea
+	// event loop. Explicit slots ignore this gate; see newAccountPresentation.
+	accountSlotsConfigured atomic.Bool
 
 	// Sessions/Preview split (issue #1092): percentage of width allocated to
 	// preview pane. Loaded from config.toml [ui] preview_pct, adjustable
@@ -642,9 +695,14 @@ type Home struct {
 	// fleet poll). Unlike session-derived buckets it includes EMPTY groups,
 	// so the M move dialog can still offer a remote folder after every
 	// session has been moved out of it. Guarded by remoteSessionsMu.
-	remoteGroups       map[string][]string  // remoteName -> group paths in the remote's own order (incl. empty groups)
-	remoteFromCache    map[string]bool      // remoteName -> data is a startup cache snapshot, not live yet
-	remoteFetchedAt    map[string]time.Time // remoteName -> when its sessions last came from a live fetch
+	remoteGroups    map[string][]string  // remoteName -> group paths in the remote's own order (incl. empty groups)
+	remoteFromCache map[string]bool      // remoteName -> data is a startup cache snapshot, not live yet
+	remoteFetchedAt map[string]time.Time // remoteName -> when its sessions last came from a live fetch
+	// remoteVersions is what each remote last reported for `agent-deck
+	// version`, asked at most once per remoteVersionCheckInterval on the
+	// session poll and seeded from the shared cache file (#2164). Guarded
+	// by remoteSessionsMu.
+	remoteVersions     map[string]session.RemoteVersionState
 	remoteSessionsMu   sync.RWMutex
 	lastRemoteFetch    time.Time // When remote sessions were last fetched
 	remotesFetchActive bool      // Prevents overlapping fetches
@@ -1273,7 +1331,7 @@ func (h *Home) getLayoutMode() string {
 func (h *Home) contentChromeTop() int {
 	top := 1 // header line
 	top++    // filter bar (always shown, matches View())
-	if h.shouldRenderUpdateNudge() {
+	if h.shouldRenderUpdateBanner() {
 		top++
 	}
 	if h.maintenanceMsg != "" {
@@ -1298,7 +1356,7 @@ func (h *Home) stackedPreviewTopY() int {
 	const helpBarHeight = 2
 	filterBarHeight := 1
 	updateBannerHeight := 0
-	if h.shouldRenderUpdateNudge() {
+	if h.shouldRenderUpdateBanner() {
 		updateBannerHeight = 1
 	}
 	maintenanceBannerHeight := 0
@@ -1408,6 +1466,7 @@ type openCodeDetectionCompleteMsg struct {
 
 type updateCheckMsg struct {
 	info *update.UpdateInfo
+	err  error
 }
 
 type (
@@ -1572,6 +1631,9 @@ type remoteSessionsFetchedMsg struct {
 	// The handler keeps their last-good sessions instead of wiping them,
 	// so one slow/offline remote can't flicker the whole list.
 	failed map[string]bool
+	// versions carries the `agent-deck version` answers collected this
+	// round, only for remotes whose cached answer was stale (#2164).
+	versions map[string]session.RemoteVersionState
 }
 
 // remoteLatenciesFetchedMsg is sent when an async batch of latency
@@ -1667,6 +1729,9 @@ func shouldPromptHermesHooks(installed bool, decision string) bool {
 // NewHomeWithProfileAndMode creates a new Home with the specified profile.
 // All instances manage the notification bar equally via shared SQLite state.
 func NewHomeWithProfileAndMode(profile string) *Home {
+	// Read (and unset) what a predecessor left for us before anything else
+	// in this process can spawn a child (restart.go).
+	restartHandoff := consumeRestartEnv()
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var storageWarning string
@@ -1700,6 +1765,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 	}
 
 	h := &Home{
+		restartHandoff:            restartHandoff,
 		profile:                   actualProfile,
 		storage:                   storage,
 		storageWarning:            storageWarning,
@@ -1739,6 +1805,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		cancel:                    cancel,
 		instances:                 []*session.Instance{},
 		instanceByID:              make(map[string]*session.Instance),
+		switchGenerations:         make(map[string]uint64),
 		groupTree:                 session.NewGroupTree([]*session.Instance{}),
 		flatItems:                 []session.Item{},
 		previewCache:              make(map[string]string),
@@ -1836,6 +1903,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 	// Restore persisted UI state (preview mode, status filter, cursor position)
 	h.loadUIState()
 	h.loadRemoteSessionsCache()
+	h.remoteVersions = session.LoadRemoteVersions()
 
 	// Apply default_filter from config if no filter was restored from persisted state.
 	// Auto-clears if no sessions match (handled in rebuildFlatItems).
@@ -1947,6 +2015,9 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 
 	// Hook-based status detection (Claude Code lifecycle hooks)
 	userConfig, _ := session.LoadUserConfig()
+	// Seed the account-badge gate from the same config read; the settings panel
+	// refreshes it on save so adding a slot lights the badges without a restart.
+	h.accountSlotsConfigured.Store(len(session.ConfiguredAccountNames(userConfig)) > 0)
 	hooksEnabled := userConfig == nil || userConfig.Claude.GetHooksEnabled()
 	if homeBackgroundWorkersEnabled && hooksEnabled {
 		configDir := session.GetClaudeConfigDir()
@@ -3376,7 +3447,7 @@ func (h *Home) syncViewport() {
 	// Filter bar is always shown for consistent layout (matches View())
 	filterBarHeight := 1
 	updateBannerHeight := 0
-	if h.shouldRenderUpdateNudge() {
+	if h.shouldRenderUpdateBanner() {
 		updateBannerHeight = 1
 	}
 	maintenanceBannerHeight := 0
@@ -3623,7 +3694,7 @@ func (h *Home) getVisibleHeight() int {
 	panelTitleLines := 2
 	filterBarHeight := 1
 	updateBannerHeight := 0
-	if h.shouldRenderUpdateNudge() {
+	if h.shouldRenderUpdateBanner() {
 		updateBannerHeight = 1
 	}
 	maintenanceBannerHeight := 0
@@ -3697,12 +3768,20 @@ func (h *Home) Init() tea.Cmd {
 		h.intervalHookRunner.Start()
 	}
 
+	// Fingerprint the running executable so the tick loop can tell when an
+	// update lands on disk while the TUI is open.
+	if exe, err := os.Executable(); err == nil {
+		h.startBinaryWatch(exe, Version)
+	}
+	h.homebrewManaged = detectHomebrewManaged()
+	h.applyAutoUpdateSuppression()
+
 	cmds := []tea.Cmd{
 		h.sessionLoadCmd(nil, true),
 
 		h.tick(),
 		h.reviverTick(),
-		h.checkForUpdate(),
+		h.requestUpdateCheck(time.Now()),
 		h.fetchRemoteSessions,
 		h.waitRemoteChange,
 		// Opt-in telemetry daily report. MaybeSend re-reads consent from
@@ -3725,14 +3804,6 @@ func (h *Home) Init() tea.Cmd {
 	cmds = append(cmds, h.startWatcherEngine())
 
 	return tea.Batch(cmds...)
-}
-
-// checkForUpdate checks for updates asynchronously
-func (h *Home) checkForUpdate() tea.Cmd {
-	return func() tea.Msg {
-		info, _ := update.CheckForUpdate(Version, false)
-		return updateCheckMsg{info: info}
-	}
 }
 
 // listenForReloads waits for storage change notification
@@ -3972,6 +4043,9 @@ func (h *Home) applyRemoteFetch(msg remoteSessionsFetchedMsg) (tea.Model, tea.Cm
 		h.remoteSessionsMu.Unlock()
 		if msg.configErr == nil {
 			h.applyRemoteCosts(msg)
+			// The version answer is a fact about the remote, not about
+			// which listing is newer: keep it (#2164).
+			h.recordRemoteVersions(msg.versions)
 		} else {
 			h.setError(fmt.Errorf("remote refresh skipped, config could not be read: %v", msg.configErr))
 		}
@@ -4012,6 +4086,7 @@ func (h *Home) applyRemoteFetch(msg remoteSessionsFetchedMsg) (tea.Model, tea.Cm
 	roundDone := h.remoteFetchLanded(msg)
 	h.remoteSessionsMu.Unlock()
 	h.saveRemoteSessionsCache(msg.sessions)
+	h.recordRemoteVersions(msg.versions)
 	h.applyRemoteCosts(msg)
 	// #1112 bug 1: a remote running→waiting transition wouldn't update
 	// the header pill ("[◐ Waiting N]") because countSessionStatuses
@@ -4475,6 +4550,24 @@ func (h *Home) fetchOneRemote(gen uint64, name string, rc session.RemoteConfig, 
 		groupErr   error
 		side       sync.WaitGroup
 	)
+	// #2164: the remote's agent-deck version rides the same round, but only
+	// when its cached answer is older than remoteVersionCheckInterval, so
+	// the header's drift marker costs one SSH call per hour per remote, not
+	// per tick. Test runners that cannot report a version are skipped.
+	checker, canCheck := runner.(remoteVersionChecker)
+	needVersion := canCheck && h.remoteVersionNeedsCheck(name, time.Now())
+	if needVersion {
+		side.Add(1)
+		go func() {
+			defer side.Done()
+			versionCtx, versionCancel := context.WithTimeout(h.ctx, rc.GetCommandTimeout())
+			defer versionCancel()
+			version, found := checker.CheckBinary(versionCtx)
+			msg.versions = map[string]session.RemoteVersionState{
+				name: {Version: version, Found: found, CheckedAt: time.Now()},
+			}
+		}()
+	}
 	side.Add(2)
 	go func() {
 		defer side.Done()
@@ -5496,6 +5589,51 @@ func (h *Home) getSessionRenderSnapshot() map[string]sessionRenderState {
 	return nil
 }
 
+// setAccountSlotsConfigured updates only inherited account presentations when
+// settings cross the configured/unconfigured boundary. Copy the snapshot so
+// active renderers keep an immutable view, without rereading session state.
+func (h *Home) setAccountSlotsConfigured(configured bool) {
+	h.sessionRenderSnapshotMu.Lock()
+	defer h.sessionRenderSnapshotMu.Unlock()
+	if h.accountSlotsConfigured.Swap(configured) == configured {
+		return
+	}
+	previous := h.getSessionRenderSnapshot()
+	if len(previous) == 0 {
+		return
+	}
+	snap := make(map[string]sessionRenderState, len(previous))
+	display := newAccountPresentation("", configured)
+	for id, state := range previous {
+		if state.account == "" {
+			state.accountDisplay = display
+		}
+		snap[id] = state
+	}
+	h.sessionRenderSnapshot.Store(snap)
+}
+
+// publishSessionRenderSnapshot takes ownership of snap. Resolve presentations
+// at publication so an in-flight refresh cannot restore an old settings gate.
+// Instance reads happen before this lock, keeping settings updates bounded to
+// cached render data even when a background status writer holds Instance.mu.
+func (h *Home) publishSessionRenderSnapshot(snap map[string]sessionRenderState) {
+	h.sessionRenderSnapshotMu.Lock()
+	defer h.sessionRenderSnapshotMu.Unlock()
+	accounts := make(map[string]accountPresentation)
+	slotsConfigured := h.accountSlotsConfigured.Load()
+	for id, state := range snap {
+		display, ok := accounts[state.account]
+		if !ok {
+			display = newAccountPresentation(state.account, slotsConfigured)
+			accounts[state.account] = display
+		}
+		state.accountDisplay = display
+		snap[id] = state
+	}
+	h.sessionRenderSnapshot.Store(snap)
+}
+
 func (h *Home) refreshSessionRenderSnapshot(instances []*session.Instance) {
 	if instances == nil {
 		h.instancesMu.RLock()
@@ -5505,7 +5643,6 @@ func (h *Home) refreshSessionRenderSnapshot(instances []*session.Instance) {
 	}
 
 	snap := make(map[string]sessionRenderState, len(instances))
-	accounts := make(map[string]accountPresentation)
 	for _, inst := range instances {
 		if inst == nil {
 			continue
@@ -5524,12 +5661,6 @@ func (h *Home) refreshSessionRenderSnapshot(instances []*session.Instance) {
 			autoName:     inst.GetAutoName(),
 			autoNameDesc: inst.GetAutoNameDescription(),
 		}
-		display, ok := accounts[state.account]
-		if !ok {
-			display = newAccountPresentation(state.account)
-			accounts[state.account] = display
-		}
-		state.accountDisplay = display
 		// Look up pane title from the already-refreshed tmux cache.
 		// Only RefreshPaneInfoCache (called from backgroundStatusUpdate) keeps
 		// the cache fresh; processStatusUpdate and other rebuild paths run on
@@ -5554,7 +5685,7 @@ func (h *Home) refreshSessionRenderSnapshot(instances []*session.Instance) {
 		}
 		snap[inst.ID] = state
 	}
-	h.sessionRenderSnapshot.Store(snap)
+	h.publishSessionRenderSnapshot(snap)
 }
 
 func (h *Home) getSessionRenderState(inst *session.Instance) sessionRenderState {
@@ -5574,7 +5705,7 @@ func (h *Home) getSessionRenderState(inst *session.Instance) sessionRenderState 
 		status:         inst.GetStatusThreadSafe(),
 		tool:           inst.GetToolThreadSafe(),
 		account:        account,
-		accountDisplay: newAccountPresentation(account),
+		accountDisplay: newAccountPresentation(account, h.accountSlotsConfigured.Load()),
 		title:          inst.GetTitleThreadSafe(),
 		autoName:       inst.GetAutoName(),
 		autoNameDesc:   inst.GetAutoNameDescription(),
@@ -5909,15 +6040,12 @@ func (h *Home) backgroundStatusUpdate() {
 				conductorName := strings.TrimPrefix(inst.Title, "conductor-")
 				safego.Go(uiLog, "conductor_clear_and_heartbeat", func() {
 					time.Sleep(500 * time.Millisecond)
-					_ = tmuxSess.SendKeysAndEnter("/clear")
-					// After /clear wipes context, immediately send heartbeat to restore orientation
-					time.Sleep(3 * time.Second)
-					_ = session.DefaultProfile
-					if meta, err := session.LoadConductorMeta(conductorName); err == nil {
-						_ = meta.Profile
-					}
 					msg := fmt.Sprintf("Heartbeat: Check sessions in your group (%s). List any that are waiting, auto-respond where safe, and report what needs my attention.", conductorName)
-					_ = tmuxSess.SendKeysAndEnter(msg)
+					if err := clearConductorAndHeartbeat(func(body string) error {
+						return deliverToConductorPane(tmuxSess, body)
+					}, msg, 3*time.Second); err != nil {
+						uiLog.Warn("conductor_clear_heartbeat_refused", slog.String("error", err.Error()))
+					}
 				})
 			}
 		}
@@ -7105,6 +7233,10 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Save after dedup to persist any ID changes (initial load only)
 				h.saveInstances()
 			}
+			// Pick up where the process we were exec'd from left off.
+			if firstLoad {
+				h.applyRestartHandoff()
+			}
 			// Trigger immediate preview fetch for initial selection (mutex-protected)
 			if selected := h.getSelectedSession(); selected != nil {
 				h.previewCacheMu.Lock()
@@ -7523,21 +7655,89 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case accountSwitchedMsg:
-		delete(h.resumingSessions, msg.sessionID)
+		// Completion belongs to exactly the generation and source snapshot that
+		// launched it. An old completion must not clear a newer spinner or force
+		// save a replacement instance loaded by the watcher.
+		h.instancesMu.RLock()
+		current := h.instanceByID[msg.sessionID]
+		// Status belongs to independent monitor/lifecycle ownership and may change
+		// while this switch is running. It must not reject the bounded registry
+		// commit; account/command/path/native-ID conflicts are checked atomically
+		// by Storage.CommitNativeHarnessSwitch below.
+		fresh := current != nil && h.switchGenerations[msg.sessionID] == msg.generation && current.Tool == msg.sourceTool && current.Account == msg.sourceAccount && current.ProjectPath == msg.sourceProject && current.Title == msg.sourceTitle && current.GroupPath == msg.sourceGroup && current.Command == msg.sourceCommand && current.ClaudeSessionID == msg.sourceClaudeID && current.CodexSessionID == msg.sourceCodexID && current.EffectiveWorkingDir() == msg.sourceCWD
 		if msg.committed {
-			// The slot (and any conversation move) is already applied in
-			// memory; persist it and repaint the row's account badge.
+			// A storage watcher can replace the switched pointer with the source
+			// row after recording only a monitor status. Accept either in-memory
+			// account representation here; the storage CAS is the authority for
+			// substantive source identity conflicts and reconciles the target.
+			fresh = current != nil && h.switchGenerations[msg.sessionID] == msg.generation && current.Tool == msg.sourceTool && current.ProjectPath == msg.sourceProject && current.Title == msg.sourceTitle && current.GroupPath == msg.sourceGroup && current.Command == msg.sourceCommand && current.EffectiveWorkingDir() == msg.sourceCWD && (current.Account == msg.sourceAccount || current.Account == msg.account)
+		}
+		h.instancesMu.RUnlock()
+		if !fresh {
+			uiLog.Debug("stale_harness_switch_completion", slog.String("session_id", msg.sessionID), slog.Uint64("generation", msg.generation))
+			return h, nil
+		}
+		delete(h.resumingSessions, msg.sessionID)
+		// A distinct target is attachable only after an explicit positive native
+		// readiness result with no execution error. Pending is not a substitute
+		// for readiness, and an error after a durable target write is recovery-only.
+		if msg.target != nil && msg.targetReady && msg.err == nil {
+			h.instancesMu.Lock()
+			if _, exists := h.instanceByID[msg.target.ID]; !exists {
+				h.instances = append(h.instances, msg.target)
+				h.instanceByID[msg.target.ID] = msg.target
+				if h.groupTree != nil {
+					h.groupTree.AddSession(msg.target)
+				}
+			}
+			h.instancesMu.Unlock()
 			h.rebuildFlatItems()
-			h.forceSaveInstances()
-			h.invalidatePreviewCache(msg.sessionID)
+			h.invalidatePreviewCache(msg.target.ID)
+		}
+		if msg.committed && msg.nativeResult != nil {
+			// Persist the precise post-lifecycle native mutation. A full TUI
+			// snapshot here can be stale after an independent status sweep and
+			// would either conflict or overwrite unrelated registry changes.
+			if h.storage == nil {
+				msg.err = fmt.Errorf("persist native switch: storage is unavailable")
+				msg.pending = false
+				msg.summary = "status=failed; recovery_required=true; storage is unavailable"
+			} else if err := h.storage.CommitNativeHarnessSwitch(current, msg.nativeResult); err != nil {
+				msg.err = fmt.Errorf("persist native switch: %w", err)
+				msg.pending = false
+				msg.summary = fmt.Sprintf("status=failed; recovery_required=true; %v", msg.err)
+			} else {
+				h.rebuildFlatItems()
+				h.invalidatePreviewCache(msg.sessionID)
+			}
 		}
 		for _, warning := range msg.warnings {
 			uiLog.Warn("account_switch_warning", slog.String("session_id", msg.sessionID), slog.String("detail", warning))
 		}
-		if msg.err != nil {
+		// Journal persistence after a commit is a failed, recovery-required
+		// operation, like the CLI. Ordinary readiness-pending results retain their
+		// pending notice even though the backend uses ErrCrossHarnessPending to
+		// make callers inspect the result.
+		if msg.err != nil && (!msg.pending || errors.Is(msg.err, session.ErrCrossHarnessRecoveryRequired)) {
 			// A refused switch explains why in a paragraph the footer banner
 			// would clip, and the session may be left stopped — show it in the
-			// modal instead, where it cannot be missed.
+			// modal instead, where it cannot be missed. Preserve any committed
+			// metadata rather than hiding a recovery-required partial operation.
+			body := msg.err.Error()
+			if msg.summary != "" {
+				body += "\n\n" + msg.summary
+			}
+			if msg.committed {
+				body += "\n\nstatus=failed; recovery_required=true; committed=true"
+			}
+			h.confirmDialog.ShowNotice("Account switch failed", body)
+			return h, nil
+		}
+		if msg.pending {
+			h.confirmDialog.ShowNotice("Account switch pending", msg.summary)
+			return h, nil
+		}
+		if msg.err != nil {
 			h.confirmDialog.ShowNotice("Account switch failed", msg.err.Error())
 			return h, nil
 		}
@@ -7549,6 +7749,23 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				fmt.Sprintf("Switched to %q — %s\n\n%s", msg.account, msg.summary, strings.Join(msg.warnings, "\n")))
 			return h, nil
 		}
+		if msg.target != nil && msg.targetReady {
+			h.confirmDialog.ShowNotice("Harness transfer verified",
+				fmt.Sprintf("New %s target %q is verified and ready. %s", msg.target.Tool, msg.target.Title, msg.summary))
+			return h, nil
+		}
+		if msg.nativeResult != nil && msg.nativeResult.DestinationReady {
+			h.confirmDialog.ShowNotice("Account switch verified", msg.summary)
+			return h, nil
+		}
+		if msg.nativeResult != nil {
+			h.confirmDialog.ShowNotice("Account switch pending verification",
+				fmt.Sprintf("Account changed to %q, but its restarted harness has not reported native readiness. %s", msg.account, msg.summary))
+			return h, nil
+		}
+		// Legacy/synthetic completions without an execution receipt retain the
+		// existing footer behavior; real native and cross-harness paths above
+		// always carry the receipt needed to state verified versus pending.
 		h.setError(fmt.Errorf("account switched to %q — %s", msg.account, msg.summary))
 		return h, nil
 
@@ -7622,15 +7839,26 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case updateCheckMsg:
-		h.lastUpdateCheck = time.Now()
-		if msg.info != nil && !msg.info.Available {
-			// Update is no longer available (e.g., user updated via terminal) — dismiss banner
-			h.updateInfo = nil
-		} else {
-			h.updateInfo = msg.info
+	case updateInstallFinishedMsg:
+		return h, h.handleUpdateInstallFinished(msg)
+
+	case unattendedInstallFinishedMsg:
+		return h, h.handleUnattendedInstallFinished(msg)
+
+	case binaryVersionProbedMsg:
+		if h.binaryWatch != nil {
+			h.binaryWatch.recordProbe(msg.fingerprint, msg.version, msg.err)
+			if msg.err != nil {
+				uiLog.Debug("binary_version_probe_failed", slog.String("error", msg.err.Error()))
+			} else if v := h.binaryWatch.installedVersion; v != "" {
+				uiLog.Info("update_installed_on_disk", slog.String("running", Version), slog.String("installed", v))
+			}
 		}
-		return h, nil
+		// Restart right away when allowed; otherwise the tick loop retries.
+		return h, h.maybeAutoRestart()
+
+	case updateCheckMsg:
+		return h, h.handleUpdateCheck(msg)
 
 	case remoteFetchRoundMsg:
 		// Fan out: each remote answers with its own remoteSessionsFetchedMsg.
@@ -7717,6 +7945,23 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.remoteLatencyFetchBusy = false
 		h.remoteLatencyMu.Unlock()
 		return h, nil
+
+	case remoteUpdatedMsg:
+		if msg.err != nil {
+			// The footer is one line and cuts the remedy at the terminal
+			// edge; the dialog wraps the whole message (#2244).
+			h.setError(fmt.Errorf("failed to update remote %s: %w", msg.remoteName, msg.err))
+			h.confirmDialog.ShowNotice(fmt.Sprintf("Remote update failed: %s", msg.remoteName), msg.err.Error())
+			return h, nil
+		}
+		// The deploy verified the remote runs msg.to; show it now and let the
+		// next poll's hourly re-check confirm it rather than trusting a stale
+		// cached answer.
+		h.recordRemoteVersions(map[string]session.RemoteVersionState{
+			msg.remoteName: {Version: msg.to, Found: true, CheckedAt: time.Now()},
+		})
+		h.setError(fmt.Errorf("updated remote %s to v%s", msg.remoteName, msg.to))
+		return h, h.fetchRemoteSessions
 
 	case remoteSessionDeletedMsg:
 		h.setRemotePending(msg.sessionID, "")
@@ -8861,14 +9106,6 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}()
 		}
 
-		// Periodic update re-check every 5 minutes to dismiss stale banner
-		// after the user updates agent-deck via terminal while TUI is running
-		const updateRecheckInterval = 5 * time.Minute
-		if h.updateInfo != nil && h.updateInfo.Available && time.Since(h.lastUpdateCheck) >= updateRecheckInterval {
-			h.lastUpdateCheck = time.Now()
-			return h, tea.Batch(h.tick(), h.checkForUpdate())
-		}
-
 		// Clean up expired animation entries (launching, resuming, MCP loading, forking)
 		// For Claude: remove after 20s timeout (animation shows for ~6-15s)
 		// For others: remove after 5s timeout
@@ -8924,7 +9161,16 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				h.previewCacheMu.Unlock()
 			}
 		}
-		cmds := []tea.Cmd{h.tick(), previewCmd, remoteFetchCmd, remoteLatencyCmd, h.syncRemotePaneWatch()}
+		// Periodic update check: notices a release that lands while the
+		// deck is open (auto_install acts on the result) and dismisses a
+		// stale banner after an update from a terminal.
+		updateCheckCmd := h.periodicUpdateCheck(time.Now())
+		// One os.Stat per tick; a version probe only when the file changed.
+		binaryProbeCmd := h.pollBinaryChange()
+		// auto_restart: hand over to an installed newer build once idle.
+		autoRestartCmd := h.maybeAutoRestart()
+
+		cmds := []tea.Cmd{h.tick(), previewCmd, remoteFetchCmd, remoteLatencyCmd, h.syncRemotePaneWatch(), updateCheckCmd, binaryProbeCmd, autoRestartCmd}
 		if h.fullRepaint {
 			cmds = append(cmds, tea.ClearScreen)
 		}
@@ -9038,6 +9284,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				h.reloadHotkeysFromConfig()
 				h.showSessionTimestamps = config.Display.ShowSessionTimestamps
 				h.showPaneTitles = config.Display.ShowPaneTitles
+				h.setAccountSlotsConfigured(len(session.ConfiguredAccountNames(config)) > 0)
 
 				// Apply theme changes live
 				h.stopThemeWatcher()
@@ -10069,6 +10316,7 @@ func (h *Home) hasModalVisible() bool {
 		h.worktreeFinishDialog.IsVisible() || h.editPathsDialog.IsVisible() ||
 		h.editSessionDialog.IsVisible() ||
 		(h.telemetryDialog != nil && h.telemetryDialog.IsVisible()) ||
+		(h.feedbackDialog != nil && h.feedbackDialog.IsVisible()) ||
 		h.zoxidePicker.IsVisible()
 }
 
@@ -10225,7 +10473,7 @@ func (h *Home) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 func (h *Home) getListContentStartY() int {
 	// Header: 1 line, Filter bar: 1 line
 	startY := 2
-	if h.shouldRenderUpdateNudge() {
+	if h.shouldRenderUpdateBanner() {
 		startY++ // Update banner
 	}
 	if h.maintenanceMsg != "" {
@@ -11430,6 +11678,14 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Mark session as unread (idle → waiting)
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
+			// #2164: on a remote host header that runs an older release, u
+			// offers the update instead. A header without drift is a no-op.
+			if item.Type == session.ItemTypeRemoteGroup && item.Level == 0 {
+				if state, ok := h.remoteVersionState(item.RemoteName); ok && state.Outdated(Version) {
+					h.confirmDialog.ShowUpdateRemote(item.RemoteName, state.Version, Version)
+				}
+				return h, nil
+			}
 			if item.Type == session.ItemTypeSession && item.Session != nil {
 				tmuxSess := item.Session.GetTmuxSession()
 				if tmuxSess != nil {
@@ -11765,6 +12021,17 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.remoteSessionsMu.Unlock()
 		return h, tea.Batch(h.sessionLoadCmd(&state, false), h.fetchRemoteSessions)
 
+	case "ctrl+t":
+		// Restart the TUI in place so an update installed while it was open
+		// takes effect (restart.go). Refuses with a footer message while a
+		// dialog is open or a session action is running.
+		return h.tryRestartDeck()
+
+	case "ctrl+y":
+		// Run `agent-deck update` on the terminal (TUI suspended); a
+		// successful install flips the banner to the restart hint.
+		return h.tryInstallUpdate()
+
 	case "ctrl+s":
 		// Open the session switcher from the overview too, with the same key
 		// used while attached. Pre-highlight the session under the cursor (if
@@ -11987,10 +12254,10 @@ func (h *Home) handleConfirmDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if h.confirmDialog.GetFocusedButton() == 0 {
 				return h, h.confirmAction()
 			}
-			h.confirmDialog.Hide()
+			h.dismissConfirmDialog()
 			return h, nil
 		case "n", "N", "esc":
-			h.confirmDialog.Hide()
+			h.dismissConfirmDialog()
 			return h, nil
 		}
 	}
@@ -11998,9 +12265,47 @@ func (h *Home) handleConfirmDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return h, nil
 }
 
+// dismissConfirmDialog closes a y/n confirmation without acting. A declined
+// same-harness account switch returns to the Edit Session dialog, which is
+// still open underneath, with focus on the account row and nothing written.
+func (h *Home) dismissConfirmDialog() {
+	switchDeclined := h.confirmDialog.GetConfirmType() == ConfirmSwitchAccount
+	h.confirmDialog.Hide()
+	if switchDeclined && h.editSessionDialog.IsVisible() {
+		h.editSessionDialog.FocusField(session.FieldAccount)
+	}
+}
+
 // confirmAction executes the confirmed destructive action.
 func (h *Home) confirmAction() tea.Cmd {
 	switch h.confirmDialog.GetConfirmType() {
+	case ConfirmSwitchAccount:
+		sessionID, harness, account := h.confirmDialog.GetTargetID(), h.confirmDialog.TargetHarness(), h.confirmDialog.TargetAccount()
+		h.instancesMu.RLock()
+		inst := h.instanceByID[sessionID]
+		unchanged := h.confirmDialog.CrossHarnessSourceMatches(inst)
+		h.instancesMu.RUnlock()
+		if !unchanged {
+			h.confirmDialog.ShowNotice("Account switch cancelled", "The source session changed while this confirmation was open. Review the current session and confirm a new switch.")
+			return nil
+		}
+		h.confirmDialog.Hide()
+		h.editSessionDialog.Hide()
+		h.resumingSessions[sessionID] = time.Now()
+		return h.switchSessionHarness(sessionID, harness, account)
+	case ConfirmCrossHarnessTransfer:
+		sessionID, harness, account := h.confirmDialog.GetTargetID(), h.confirmDialog.TargetHarness(), h.confirmDialog.TargetAccount()
+		h.instancesMu.RLock()
+		inst := h.instanceByID[sessionID]
+		unchanged := h.confirmDialog.CrossHarnessSourceMatches(inst)
+		h.instancesMu.RUnlock()
+		if !unchanged {
+			h.confirmDialog.ShowNotice("Harness transfer cancelled", "The source session changed while this confirmation was open. Review the current session and confirm a new transfer.")
+			return nil
+		}
+		h.confirmDialog.Hide()
+		h.resumingSessions[sessionID] = time.Now()
+		return h.switchSessionHarness(sessionID, harness, account)
 	case ConfirmDeleteSession:
 		sessionID := h.confirmDialog.GetTargetID()
 		if inst := h.getInstanceByID(sessionID); inst != nil {
@@ -12058,6 +12363,13 @@ func (h *Home) confirmAction() tea.Cmd {
 		archive := h.confirmDialog.GetConfirmType() == ConfirmArchiveRemoteSession
 		h.confirmDialog.Hide()
 		return h.setRemoteSessionArchived(remoteName, sessionID, title, archive)
+	case ConfirmUpdateRemote:
+		remoteName := h.confirmDialog.GetRemoteName()
+		from := h.confirmDialog.targetName
+		to := h.confirmDialog.GetTargetID()
+		h.confirmDialog.Hide()
+		h.setError(fmt.Errorf("updating remote %s to v%s…", remoteName, to))
+		return h.updateRemote(remoteName, from, to)
 	case ConfirmRemoveSession:
 		sessionID := h.confirmDialog.GetTargetID()
 		if inst := h.getInstanceByID(sessionID); inst != nil {
@@ -12448,10 +12760,21 @@ func (h *Home) dispatchWatcherEvent(evt watcher.Event) {
 // Intended to run inside a goroutine.
 //
 // Issue #1409: delivery is composer-guarded — a pane whose composer holds a
-// half-typed operator draft is held briefly, then the draft is saved, cleared
-// and restored around the automated send so it cannot merge with it.
+// half-typed operator draft is held briefly, then refused without modifying it.
 func deliverToConductorPane(p guardableConductorPane, msg string) error {
 	return deliverToConductorPaneGuarded(p, msg, conductorComposerGuardOptions(), 40, 250*time.Millisecond)
+}
+
+// clearConductorAndHeartbeat rechecks the composer independently for each
+// delivery. A failed clear must never be followed by a heartbeat.
+func clearConductorAndHeartbeat(deliver func(string) error, heartbeat string, settle time.Duration) error {
+	if err := deliver("/clear"); err != nil {
+		return err
+	}
+	if settle > 0 {
+		time.Sleep(settle)
+	}
+	return deliver(heartbeat)
 }
 
 // conductorComposerGuardOptions are the production bounds of the watcher/
@@ -12467,37 +12790,18 @@ func conductorComposerGuardOptions() send.ComposerGuardOptions {
 	}
 }
 
-// deliverToConductorPaneGuarded wraps deliverToConductorPaneTuned with the
-// issue #1409 composer-draft guard: hold while an operator draft occupies the
-// composer; at the bound save-clear it; restore it (typed back, no Enter)
-// once the automated delivery is confirmed. When delivery is NOT confirmed
-// the draft is intentionally not retyped — the composer may still hold the
-// automated message and restoring would recreate the merge this guard exists
-// to prevent; the saved draft is logged instead.
+// deliverToConductorPaneGuarded waits for operator input to clear naturally.
+// If it remains or cannot be read, refuse before sending any input.
 func deliverToConductorPaneGuarded(p guardableConductorPane, msg string, guardOpts send.ComposerGuardOptions, maxChecks int, checkDelay time.Duration) error {
 	guard := send.GuardComposerDraft(p, guardOpts)
+	if guard.Refused {
+		return fmt.Errorf("message not sent: composer is occupied or unreadable; existing draft preserved")
+	}
 	// guard.ComposerPasteMarkerFree is the #1777 provenance the verify loop
 	// needs: the guard's pre-send capture saw a composer with no
 	// "[Pasted text …]" marker, so a marker seen during verification is the
 	// collapsed rendering of OUR framed multi-line payload (issue #1855).
-	err := deliverToConductorPaneAttributed(p, msg, guard.ComposerPasteMarkerFree, maxChecks, checkDelay)
-	if guard.SavedDraft != "" {
-		if err == nil {
-			// Delivery confirmed: type the operator draft back. If the
-			// type-back itself fails the draft is no longer on screen — log
-			// it so the loss is visible and recoverable, not swallowed.
-			if restoreErr := p.SendKeysChunked(guard.SavedDraft); restoreErr != nil {
-				uiLog.Warn("conductor_dispatch_draft_restore_failed",
-					slog.String("saved_draft", guard.SavedDraft),
-					slog.String("error", restoreErr.Error()))
-			}
-		} else {
-			uiLog.Warn("conductor_dispatch_draft_not_restored",
-				slog.String("saved_draft", guard.SavedDraft),
-				slog.String("error", err.Error()))
-		}
-	}
-	return err
+	return deliverToConductorPaneAttributed(p, msg, guard.ComposerPasteMarkerFree, maxChecks, checkDelay)
 }
 
 // conductorPane is the slice of *tmux.Session that reliable delivery needs.
@@ -12514,8 +12818,6 @@ type conductorPane interface {
 // composer guard needs. *tmux.Session satisfies it.
 type guardableConductorPane interface {
 	conductorPane
-	SendCtrlC() error
-	SendKeysChunked(string) error
 }
 
 // blindEnterCap bounds the fallback Enter presses for agents whose composer is
@@ -12850,25 +13152,51 @@ func (h *Home) handleEditSessionDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// chain). Only a named target goes through the switch flow; the empty
 		// value stays in the ordinary field loop below.
 		accountSwitch := ""
+		switchHarness := ""
 		switchAccount := false
 		for _, c := range changes {
 			if c.Field == session.FieldAccount && strings.TrimSpace(c.Value) != "" {
 				accountSwitch, switchAccount = c.Value, true
 			}
+			if c.Field == session.FieldTool && strings.TrimSpace(c.Value) != "" && c.Value != inst.Tool {
+				switchHarness = c.Value
+			}
 		}
-
-		// A switch to another Claude account and a change of tool cannot both
-		// land in one submit: session.SwitchAccount only supports claude, so
-		// applying the tool first would persist it and then refuse the switch,
-		// leaving the session half-edited and unrestarted. Refuse the pair up
-		// front, with nothing written.
-		if switchAccount {
+		// Harness/account changes are one transactional operation. Do not apply
+		// unrelated edits first: a failed destination must leave title, settings,
+		// cwd, group and routing untouched.
+		if switchAccount || switchHarness != "" {
 			for _, c := range changes {
-				if c.Field == session.FieldTool && c.Value != "claude" {
-					h.editSessionDialog.SetError("an account switch only applies to claude sessions — change the tool and the account in separate edits")
+				if c.Field != session.FieldAccount && c.Field != session.FieldTool {
+					h.editSessionDialog.SetError("save harness/account switch separately from other edits")
 					return h, nil
 				}
 			}
+			if switchHarness == "" {
+				switchHarness = inst.Tool
+			}
+			// A different harness is necessarily a bounded, lossy export. Show
+			// the same fidelity disclosure as the CLI preview and require an
+			// explicit confirmation before any target lifecycle operation.
+			if session.CanonicalSwitchHarnessForUI(switchHarness) != session.CanonicalSwitchHarnessForUI(inst.Tool) {
+				cfg, _ := session.LoadUserConfig()
+				sourceSnapshot := h.switchSourceSnapshot(inst)
+				preview := session.PreviewSwitchWithMaxBytesAndSnapshot(cfg, inst, session.SwitchPreviewTarget{Harness: switchHarness, Account: accountSwitch}, session.DefaultHandoffMaxChars, &sourceSnapshot)
+				if preview.Refusal != nil {
+					h.confirmDialog.ShowNotice("Harness transfer refused", preview.Refusal.Message)
+					return h, nil
+				}
+				h.editSessionDialog.Hide()
+				h.confirmDialog.ShowCrossHarnessTransfer(inst, switchHarness, accountSwitch, preview.Fidelity.Exclusions)
+				return h, nil
+			}
+			// Same harness, other account: also a stop + conversation move +
+			// restart, so ask once (the cross-harness branch above already
+			// does). The dialog stays open underneath; Switch runs it,
+			// Cancel returns to the account row with nothing written.
+			h.confirmDialog.SetSize(h.width, h.height)
+			h.confirmDialog.ShowSwitchAccount(inst, switchHarness, accountSwitch)
+			return h, nil
 		}
 
 		// Apply Tool last so claude-only validation (Skip/Auto/ExtraArgs)
@@ -15420,12 +15748,168 @@ func (h *Home) bulkRemoveErrored() tea.Cmd {
 // including the partial case where the switch succeeded but the restart did
 // not.
 type accountSwitchedMsg struct {
-	sessionID string
-	account   string
-	summary   string
-	committed bool
-	warnings  []string
-	err       error
+	sessionID      string
+	generation     uint64
+	sourceTool     string
+	sourceAccount  string
+	sourceProject  string
+	sourceTitle    string
+	sourceGroup    string
+	sourceCommand  string
+	sourceStatus   session.Status
+	sourceClaudeID string
+	sourceCodexID  string
+	sourceCWD      string
+	targetHarness  string
+	account        string
+	summary        string
+	committed      bool
+	pending        bool // durable target/account update without verified native readiness
+	targetReady    bool // explicit positive target-native readiness evidence
+	warnings       []string
+	target         *session.Instance // distinct cross-harness target; source remains unchanged
+	nativeResult   *session.HarnessSwitchResult
+	err            error
+}
+
+func switchTUIStatus(committed, ready, pending bool) string {
+	if pending {
+		return "pending"
+	}
+	if !committed {
+		return "failed"
+	}
+	if !ready {
+		return "pending"
+	}
+	return "success"
+}
+
+func switchTUIReadiness(ready bool) string {
+	if ready {
+		return "ready"
+	}
+	return "pending"
+}
+
+// crossHarnessSwitchMessage retains a backend result's durable metadata while
+// making an absent target explicit. Store failures can correctly return a
+// result without a target, so presentation must never assume Target is nonnil.
+func crossHarnessSwitchMessage(msg accountSwitchedMsg, preview *session.SwitchPreview, result *session.CrossHarnessSwitchResult, err error) accountSwitchedMsg {
+	msg.err = err
+	if result == nil {
+		return msg
+	}
+	msg.target, msg.targetReady, msg.pending = result.Target, result.TargetReady, result.Pending
+	if result.Pending {
+		msg.warnings = append(msg.warnings, result.MissingContract)
+	}
+	recoveryRequired := result.TargetCreated || errors.Is(err, session.ErrCrossHarnessRecoveryRequired)
+	if result.Target == nil {
+		msg.summary = fmt.Sprintf("cross-harness switch failed; status=failed; target_created=%t; recovery_required=%t", result.TargetCreated, recoveryRequired)
+		return msg
+	}
+
+	status := switchTUIStatus(true, result.TargetReady, result.Pending)
+	failed := err != nil && (!result.Pending || errors.Is(err, session.ErrCrossHarnessRecoveryRequired))
+	if failed {
+		status = "failed"
+	}
+	harness := "target"
+	if preview != nil {
+		harness = preview.TargetHarness
+	}
+	msg.summary = fmt.Sprintf("distinct %s target %s created; status=%s; recovery_required=%t; readiness=%s; account=%s; authentication=%s; context=%s; semantic acceptance=%s", harness, result.Target.ID, status, failed && recoveryRequired, switchTUIReadiness(result.TargetReady), result.ConfiguredAccount, result.Authentication, result.ContextDelivery, result.SemanticAcceptance)
+	return msg
+}
+
+// nativeHarnessSwitchMessage maps a native switch result to its TUI message.
+// A result can retain a committed account after persisting a later journal
+// transition fails. That is recovery-required, not readiness-pending: errors
+// must never be presented as a pending or successful switch.
+func nativeHarnessSwitchMessage(msg accountSwitchedMsg, result *session.HarnessSwitchResult, err error) accountSwitchedMsg {
+	msg.err = err
+	if result == nil {
+		return msg
+	}
+
+	msg.committed = result.Committed
+	msg.nativeResult = result
+	msg.targetReady = result.DestinationReady
+	msg.pending = err == nil && result.Committed && !result.DestinationReady
+	msg.warnings = result.Warnings
+
+	status := switchTUIStatus(result.Committed, result.DestinationReady, msg.pending)
+	recoveryRequired := err != nil && result.Committed
+	if err != nil {
+		status = "failed"
+	}
+	msg.summary = fmt.Sprintf("status=%s; readiness=%s; recovery_required=%t; %s", status, switchTUIReadiness(result.DestinationReady), recoveryRequired, result.Conversation)
+	return msg
+}
+
+// switchSourceSnapshot reads route metadata without mutating it. A malformed
+// or inaccessible route file is an ownership uncertainty, so cross-harness
+// replacement fails closed rather than guessing a bridge destination.
+func (h *Home) switchSourceSnapshot(inst *session.Instance) session.SwitchSourceSnapshot {
+	h.instancesMu.RLock()
+	instances := append([]*session.Instance(nil), h.instances...)
+	h.instancesMu.RUnlock()
+	return switchSourceSnapshotFromInstances(inst, instances)
+}
+
+func switchSourceSnapshotFromInstances(inst *session.Instance, instances []*session.Instance) session.SwitchSourceSnapshot {
+	watcherTarget, managementUnknown := false, false
+	watcherDir, err := session.WatcherDir()
+	if err != nil {
+		managementUnknown = true
+	} else {
+		clientsPath := filepath.Join(watcherDir, "clients.json")
+		if _, statErr := os.Stat(clientsPath); statErr == nil {
+			clients, loadErr := watcher.LoadClientsJSON(clientsPath)
+			if loadErr != nil {
+				managementUnknown = true
+			} else {
+				for _, client := range clients {
+					if client.Conductor == inst.ID || client.Conductor == inst.Title || session.ConductorSessionTitle(client.Conductor) == inst.Title {
+						watcherTarget = true
+						break
+					}
+				}
+			}
+		} else if !os.IsNotExist(statErr) {
+			managementUnknown = true
+		}
+	}
+	return session.SnapshotSwitchSource(inst, instances, watcherTarget, managementUnknown)
+}
+
+// crossHarnessSourceOwnershipValidator re-reads storage instead of relying on
+// the Home's displayed rows. The executor repeats it before staging and final
+// commit; watcher routing remains external to SQLite and is not atomic with
+// the final storage CAS.
+func (h *Home) crossHarnessSourceOwnershipValidator() session.CrossHarnessSourceOwnershipValidator {
+	return session.CrossHarnessSourceOwnershipValidatorFunc(func(source *session.Instance) (session.SwitchSourceSnapshot, error) {
+		if h.storage == nil {
+			return session.SwitchSourceSnapshot{ManagementUnknown: true}, fmt.Errorf("session storage is unavailable")
+		}
+		instances, err := h.storage.Load()
+		if err != nil {
+			return session.SwitchSourceSnapshot{ManagementUnknown: true}, fmt.Errorf("load current session graph: %w", err)
+		}
+		var current *session.Instance
+		for _, candidate := range instances {
+			if candidate != nil && source != nil && candidate.ID == source.ID {
+				current = candidate
+				break
+			}
+		}
+		if current == nil {
+			return session.AuthoritativeSwitchSourceSnapshot(source, instances, false, true)
+		}
+		snapshot := switchSourceSnapshotFromInstances(current, instances)
+		return session.AuthoritativeSwitchSourceSnapshot(source, instances, snapshot.WatcherBridgeTarget, snapshot.ManagementUnknown)
+	})
 }
 
 // switchSessionAccount moves a session to another named Claude account,
@@ -15437,28 +15921,64 @@ type accountSwitchedMsg struct {
 // Runs as a tea.Cmd because the stop/copy/start sequence talks to tmux and the
 // filesystem; doing it inline would freeze the UI for the duration.
 func (h *Home) switchSessionAccount(sessionID, account string) tea.Cmd {
+	return h.switchSessionHarness(sessionID, "claude", account)
+}
+
+// switchSessionHarness is the TUI adapter for ExecuteHarnessSwitch. The
+// confirmation/result notice is shared with the legacy account-only path, so
+// the TUI cannot accidentally bypass the journalled backend.
+func (h *Home) switchSessionHarness(sessionID, harness, account string) tea.Cmd {
+	// Capture immutable source identity and claim an operation generation before
+	// releasing the registry lock. A reload or newer operation may replace the
+	// pointer while the filesystem/lifecycle work is in flight.
+	h.instancesMu.Lock()
+	captured := h.instanceByID[sessionID]
+	if captured == nil {
+		h.instancesMu.Unlock()
+		return func() tea.Msg {
+			return accountSwitchedMsg{sessionID: sessionID, account: account, targetHarness: harness, err: fmt.Errorf("session no longer exists")}
+		}
+	}
+	h.switchGenerations[sessionID]++
+	generation := h.switchGenerations[sessionID]
+	sourceTool, sourceAccount := captured.Tool, captured.Account
+	sourceProject, sourceTitle, sourceGroup := captured.ProjectPath, captured.Title, captured.GroupPath
+	sourceCommand, sourceStatus := captured.Command, captured.Status
+	sourceClaudeID, sourceCodexID, sourceCWD := captured.ClaudeSessionID, captured.CodexSessionID, captured.EffectiveWorkingDir()
+	modalIdentity := session.CaptureSwitchModalIdentity(captured)
+	h.instancesMu.Unlock()
 	return func() tea.Msg {
-		// Resolve by ID at execution time: a storage reload can replace the
-		// pointer captured when the dialog was submitted.
+		// Resolve by ID at execution time, then require the captured identity to
+		// remain unchanged. Never mutate a replacement snapshot.
 		h.instancesMu.RLock()
 		inst := h.instanceByID[sessionID]
+		valid := inst != nil && modalIdentity.Matches(inst) && h.switchGenerations[sessionID] == generation
 		h.instancesMu.RUnlock()
-		if inst == nil {
-			return accountSwitchedMsg{sessionID: sessionID, account: account, err: fmt.Errorf("session no longer exists")}
+		if !valid {
+			return accountSwitchedMsg{sessionID: sessionID, generation: generation, sourceTool: sourceTool, sourceAccount: sourceAccount, sourceProject: sourceProject, sourceTitle: sourceTitle, sourceGroup: sourceGroup, sourceCommand: sourceCommand, sourceStatus: sourceStatus, sourceClaudeID: sourceClaudeID, sourceCodexID: sourceCodexID, sourceCWD: sourceCWD, targetHarness: harness, account: account, err: fmt.Errorf("session changed while switch was pending")}
 		}
 
 		cfg, cfgErr := session.LoadUserConfig()
+		baseMsg := accountSwitchedMsg{sessionID: sessionID, generation: generation, sourceTool: sourceTool, sourceAccount: sourceAccount, sourceProject: sourceProject, sourceTitle: sourceTitle, sourceGroup: sourceGroup, sourceCommand: sourceCommand, sourceStatus: sourceStatus, sourceClaudeID: sourceClaudeID, sourceCodexID: sourceCodexID, sourceCWD: sourceCWD, targetHarness: harness, account: account}
 		if cfgErr != nil {
-			return accountSwitchedMsg{sessionID: sessionID, account: account, err: cfgErr}
+			baseMsg.err = cfgErr
+			return baseMsg
 		}
-		result, err := session.SwitchAccount(cfg, inst, account, session.AccountSwitchOptions{})
-		msg := accountSwitchedMsg{sessionID: sessionID, account: account, err: err}
-		if result != nil {
-			msg.committed = true
-			msg.summary = result.Conversation
-			msg.warnings = result.Warnings
+		target := session.SwitchPreviewTarget{Harness: harness, Account: account}
+		sourceSnapshot := h.switchSourceSnapshot(inst)
+		preview := session.PreviewSwitchWithMaxBytesAndSnapshot(cfg, inst, target, session.DefaultHandoffMaxChars, &sourceSnapshot)
+		msg := baseMsg
+		if preview.Execution == session.ExecutionPlanned && preview.Refusal == nil {
+			crossResult, err := session.ExecuteCrossHarnessSwitch(context.Background(), cfg, inst, session.CrossHarnessSwitchOptions{Target: target, SourceSnapshot: &sourceSnapshot}, session.CrossHarnessSwitchDependencies{
+				Store:           session.StorageCrossHarnessTargetStore{Storage: h.storage},
+				Lifecycle:       session.InstanceCrossHarnessLifecycle{},
+				Observer:        session.NewNativeCrossHarnessTargetObserver(),
+				SourceOwnership: h.crossHarnessSourceOwnershipValidator(),
+			})
+			return crossHarnessSwitchMessage(msg, preview, crossResult, err)
 		}
-		return msg
+		result, err := session.ExecuteHarnessSwitch(cfg, inst, session.HarnessSwitchOptions{Target: target})
+		return nativeHarnessSwitchMessage(msg, result, err)
 	}
 }
 
@@ -16853,6 +17373,9 @@ func (h *Home) renderFrame() string {
 
 	// Show quitting splash during shutdown
 	if h.isQuitting {
+		if h.restartRequested {
+			return renderShutdownSplash(h.width, h.height, h.animationFrame, "Restarting...")
+		}
 		return renderQuittingSplash(h.width, h.height, h.animationFrame)
 	}
 
@@ -17094,7 +17617,7 @@ func (h *Home) renderFrame() string {
 	// UPDATE BANNER (if update available)
 	// ═══════════════════════════════════════════════════════════════════
 	updateBannerHeight := 0
-	if h.shouldRenderUpdateNudge() {
+	if h.shouldRenderUpdateBanner() {
 		updateBannerHeight = 1
 		updateStyle := lipgloss.NewStyle().
 			Foreground(ColorBg).
@@ -17102,7 +17625,7 @@ func (h *Home) renderFrame() string {
 			Bold(true).
 			MaxWidth(h.width).
 			Align(lipgloss.Center)
-		b.WriteString(updateStyle.Render(h.renderUpdateNudgeText()))
+		b.WriteString(updateStyle.Render(h.renderUpdateBannerText()))
 		b.WriteString("\n")
 	}
 
@@ -17341,6 +17864,11 @@ func renderLoadingSplash(width, height int, frame int) string {
 
 // renderQuittingSplash renders a splash screen during application shutdown
 func renderQuittingSplash(width, height int, frame int) string {
+	return renderShutdownSplash(width, height, frame, "Shutting down...")
+}
+
+// renderShutdownSplash draws the quit/restart splash with the given subtitle.
+func renderShutdownSplash(width, height int, frame int, subtitle string) string {
 	// Status indicator cycle (matches loading splash for consistency)
 	phase := (frame / 2) % 4
 
@@ -17382,11 +17910,11 @@ func renderQuittingSplash(width, height int, frame int) string {
 		content.WriteString("\n")
 		content.WriteString(titleStyle.Render("Agent Deck") + "\n")
 		content.WriteString("\n")
-		content.WriteString(subtitleStyle.Render("Shutting down..."))
+		content.WriteString(subtitleStyle.Render(subtitle))
 	} else {
 		// Compact/Minimal
 		content.WriteString(titleStyle.Render("Agent Deck") + "\n")
-		content.WriteString(subtitleStyle.Render("Shutting down..."))
+		content.WriteString(subtitleStyle.Render(subtitle))
 	}
 
 	contentStyle := lipgloss.NewStyle().
@@ -19878,6 +20406,7 @@ func (h *Home) renderRemoteGroupItem(b *strings.Builder, item session.Item, sele
 	h.remoteSessionsMu.RLock()
 	fromCache := h.remoteFromCache[item.RemoteName]
 	fetching := h.remotesFetchActive
+	versionState := h.remoteVersions[item.RemoteName]
 	h.remoteSessionsMu.RUnlock()
 
 	trailer := h.renderRemoteLatencyMarker(item.RemoteName, selected)
@@ -19890,11 +20419,12 @@ func (h *Home) renderRemoteGroupItem(b *strings.Builder, item session.Item, sele
 		trailer += " " + DimStyle.Render("· refreshing…")
 	}
 
-	b.WriteString(fmt.Sprintf("%s%s %s%s%s%s\n",
+	b.WriteString(fmt.Sprintf("%s%s %s%s%s%s%s\n",
 		remoteRowGutter(selected), // align with group hotkey gutter (flush with local root groups)
 		expandIcon,
 		nameStyle.Render("remotes/"+item.RemoteName),
 		countStyle.Render(fmt.Sprintf(" (%d)", counts.total)),
+		renderRemoteVersionMarker(versionState, Version, selected), // #2164: drift marker, e.g. " v1.15.0 ↑"
 		remoteStatusSuffix(counts.running, counts.waiting),
 		trailer,
 	))
@@ -20361,9 +20891,12 @@ func (h *Home) renderSessionInfoCard(inst *session.Instance, width, height int) 
 	b.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Tool:"), valueStyle.Render(cardTool)))
 
 	// Use the same cached metadata as the row; no account/config resolution.
-	account := h.getSessionRenderState(inst).accountDisplay.label
-	account = cellTruncate(account, max(0, width-cellWidth("Account slot: ")), "…")
-	b.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Account slot:"), valueStyle.Render(account)))
+	// An empty label means the row suppressed the badge (single-login machine,
+	// inherited slot) — drop the whole line rather than print an empty value.
+	if account := h.getSessionRenderState(inst).accountDisplay.label; account != "" {
+		account = cellTruncate(account, max(0, width-cellWidth("Account slot: ")), "…")
+		b.WriteString(fmt.Sprintf("%s %s\n", labelStyle.Render("Account slot:"), valueStyle.Render(account)))
+	}
 
 	// Session ID (if available) - Claude, Gemini, OpenCode, or generic (Hermes/custom tools)
 	sessionID := inst.ClaudeSessionID
