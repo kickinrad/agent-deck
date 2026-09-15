@@ -47,31 +47,27 @@ If you've had a couple of PRs land here and want to help steer, say so on #1650 
 
 ## Installation
 
-**Works on:** macOS, Linux, Windows (WSL)
+This maintained fork is distributed through mise. Pin the reviewed release
+explicitly:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/asheshgoplani/agent-deck/main/install.sh | bash
+mise use -g github:kickinrad/agent-deck@1.16.10-kickinrad.1
 ```
 
-Then run: `agent-deck`
+Then run: `agent-deck`. Do not use the upstream installer, Homebrew tap, or
+`go install ...@latest`; each can replace the reviewed fork with upstream.
 
 <details>
-<summary>Other install methods</summary>
+<summary>Maintained source checkout</summary>
 
-**Homebrew**
 ```bash
-brew install asheshgoplani/tap/agent-deck
+git clone https://github.com/kickinrad/agent-deck.git
+cd agent-deck
 ```
 
-**Go**
-```bash
-go install github.com/asheshgoplani/agent-deck/cmd/agent-deck@latest
-```
-
-**From Source**
-```bash
-git clone https://github.com/asheshgoplani/agent-deck.git && cd agent-deck && make install
-```
+Use this checkout to develop or validate the maintained fork. Contributions to
+upstream Agent Deck continue through `asheshgoplani/agent-deck`; do not treat
+an upstream install as a replacement for this pinned fork.
 
 </details>
 
@@ -1041,13 +1037,20 @@ and answer: How do I fork a session?
 
 ### Updates
 
-Agent Deck checks for updates automatically.
-- Standalone/manual install: run `agent-deck update` to install.
-- Homebrew install: run `brew upgrade asheshgoplani/tap/agent-deck`.
-- Unattended: `[updates] auto_install` is on by default, so the TUI installs an available update without asking (and restarts itself when `auto_restart` is on). For machines where the TUI is not open every day, `agent-deck update --install-timer` adds a daily run (launchd on macOS, systemd user timer on Linux); `--timer-status` and `--uninstall-timer` manage it and `--dry-run` shows what would be written. Set `auto_install = false` in [config.toml](skills/agent-deck/references/config-reference.md) to go back to installing by hand.
-- Optional: set `auto_update = true` for a Y/n prompt before the TUI opens.
-- Scripts, tests and CI: the automatic install and restart never fire under `go test`, with `CI=true`, with `AGENTDECK_SKIP_UPDATE_CHECK=1`, or when the TUI has no terminal; set the variable in any script that drives `agent-deck` and must not be interrupted by a release.
-- macOS note: launchd agents that run the agent-deck binary (`notify-daemon`, `web --no-tui`) crash-loop with `EX_CONFIG` after the binary is replaced, because macOS ties their identity to the file. Every install re-registers the `com.agentdeck.*` agents automatically and prints the `launchctl bootout`/`bootstrap` commands if one does not come back.
+This fork is updated only by reviewing and changing its explicit mise pin. Do
+not run `agent-deck update`, install update timers, or use Homebrew to update
+it. In host configuration, disable the native updater and set
+`AGENTDECK_SKIP_UPDATE_CHECK=1` for the managed process:
+
+```toml
+[updates]
+auto_install = false
+auto_restart = false
+auto_update_remotes = false
+```
+
+The fork updater targets `kickinrad/agent-deck`; keeping automatic checks
+disabled ensures one reviewed version serves the CLI, web, and notifier.
 
 ## FAQ
 
