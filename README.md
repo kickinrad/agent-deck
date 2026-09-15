@@ -19,6 +19,14 @@
 
 </div>
 
+> **kickinrad fork:** This repository packages a maintained fork of
+> [asheshgoplani/agent-deck](https://github.com/asheshgoplani/agent-deck), based on upstream v1.16.10.
+> Install the pinned fork release with:
+>
+> ```bash
+> mise use --global github:kickinrad/agent-deck@v1.16.10-kickinrad.1
+> ```
+
 **Agent Deck is mission control for your AI coding agents.** Running Claude Code on ten projects, OpenCode on five more, another agent somewhere in the background? One terminal shows every session — running, waiting, or done — and one keystroke switches between them. Groups, search, forking, git worktrees, cost tracking, and a phone-controlled [conductor](#conductor) keep a whole fleet manageable.
 
 https://github.com/user-attachments/assets/e4f55917-435c-45ba-92cc-89737d0d1401
