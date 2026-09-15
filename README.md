@@ -1039,18 +1039,19 @@ and answer: How do I fork a session?
 
 This fork is updated only by reviewing and changing its explicit mise pin. Do
 not run `agent-deck update`, install update timers, or use Homebrew to update
-it. In host configuration, disable the native updater and set
-`AGENTDECK_SKIP_UPDATE_CHECK=1` for the managed process:
+it. In host configuration, disable native automatic checks, installation, and
+restart so mise owns updates:
 
 ```toml
 [updates]
+check_enabled = false
 auto_install = false
 auto_restart = false
 auto_update_remotes = false
 ```
 
-The fork updater targets `kickinrad/agent-deck`; keeping automatic checks
-disabled ensures one reviewed version serves the CLI, web, and notifier.
+The fork updater targets `kickinrad/agent-deck`; these settings ensure one
+reviewed version serves the CLI, web, and notifier.
 
 ## FAQ
 

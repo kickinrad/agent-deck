@@ -198,7 +198,7 @@ release-local:
 	@echo "Assets are attached to a DRAFT (.goreleaser.yml release.draft, #1759)."
 	@echo "Verify the assets, then publish it yourself — CI's publish step does not run for a local release:"
 	@echo "  gh release view $$(git describe --tags --exact-match) --repo kickinrad/agent-deck"
-	@echo "  gh release edit $$(git describe --tags --exact-match) --repo kickinrad/agent-deck --draft=false --latest"
+	@echo "  gh release edit $$(git describe --tags --exact-match) --repo kickinrad/agent-deck --draft=false --latest=false"
 	@echo "Note: no SLSA provenance and no Homebrew tap update happen for a local release —"
 	@echo "both live in .github/workflows/release.yml. Prefer pushing the tag and letting CI do it."
 
