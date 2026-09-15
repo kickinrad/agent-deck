@@ -61,7 +61,7 @@ changelog:
 
 release:
   github:
-    owner: asheshgoplani
+    owner: kickinrad
     name: agent-deck
   # Assets are attached to a DRAFT and the release workflow publishes it only
   # after every expected tarball + checksums.txt is present and checksum-verified
@@ -87,28 +87,18 @@ release:
   header: |
     ## Agent Deck v{{.Version}}
 
-    Terminal session manager for AI coding agents.
+    Maintained fork of [asheshgoplani/agent-deck](https://github.com/asheshgoplani/agent-deck), based on upstream v1.16.10.
 
     ### Installation
 
-    **Homebrew (recommended):**
+    **mise:**
     ```bash
-    brew install asheshgoplani/tap/agent-deck
-    ```
-
-    **Quick Install:**
-    ```bash
-    curl -fsSL https://raw.githubusercontent.com/asheshgoplani/agent-deck/main/install.sh | bash
-    ```
-
-    **Go Install:**
-    ```bash
-    go install github.com/asheshgoplani/agent-deck/cmd/agent-deck@v{{.Version}}
+    mise use --global github:kickinrad/agent-deck@v{{.Version}}
     ```
   footer: |
     ---
 
-    **Full Changelog**: https://github.com/asheshgoplani/agent-deck/compare/{{ .PreviousTag }}...{{ .Tag }}
+    **Full Changelog**: https://github.com/kickinrad/agent-deck/compare/{{ .PreviousTag }}...{{ .Tag }}
 
 # Homebrew tap. GoReleaser only GENERATES the formula here — it never pushes it.
 # The push lives in .github/workflows/release.yml ("Update Homebrew tap formula"),

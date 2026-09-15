@@ -44,6 +44,7 @@ permissions:
 
 jobs:
   release:
+    if: github.repository == 'kickinrad/agent-deck'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     # Tag-push runs use the pushed tag; manual dispatch supplies it explicitly.
@@ -206,7 +207,6 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
       - name: Validate release assets
         timeout-minutes: 5
@@ -343,7 +343,7 @@ jobs:
       # If Sigstore/Fulcio is genuinely down and a release must go out anyway,
       # publish the verified draft by hand — the assets are already attached and
       # checksum-verified at this point:
-      #   gh release edit <tag> --repo asheshgoplani/agent-deck --draft=false --latest
+      #   gh release edit <tag> --repo kickinrad/agent-deck --draft=false --latest
       - name: Attest build provenance
         timeout-minutes: 10
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
@@ -410,6 +410,7 @@ jobs:
       # formula's download URLs only resolve once the release is public, and
       # homebrew-verify.yml compares the tap against /releases/latest.
       - name: Update Homebrew tap formula (best effort)
+        if: github.repository == 'asheshgoplani/agent-deck'
         continue-on-error: true
         timeout-minutes: 5
         env:
@@ -556,7 +557,7 @@ jobs:
           echo "Homebrew tap updated: ${TAP_REPO}/${TAP_FORMULA_PATH} is now ${VERSION}."
 
       - name: Notify on failure
-        if: failure()
+        if: failure() && github.repository == 'asheshgoplani/agent-deck'
         timeout-minutes: 2
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}

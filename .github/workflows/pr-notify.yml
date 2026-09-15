@@ -7,8 +7,8 @@ on:
 jobs:
   notify:
     runs-on: ubuntu-latest
-    # Skip draft PRs unless they become ready
-    if: github.event.pull_request.draft == false
+    # Maintainer notifications belong to the upstream repository.
+    if: github.repository == 'asheshgoplani/agent-deck' && github.event.pull_request.draft == false
     steps:
       - name: Gather PR context
         id: context
