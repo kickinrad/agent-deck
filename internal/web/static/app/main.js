@@ -138,7 +138,10 @@ function scheduleSSERecovery(delay) {
       }
     }
 
-    if (retryTransient) scheduleSSERecovery()
+    // A peer can close while this probe is in flight. It was absent from the
+    // snapshot above, so it has no outcome in this pass and needs its own
+    // recovery attempt even when every probed source was ready.
+    if (retryTransient || closedSSESources().length > 0) scheduleSSERecovery()
   }, wait)
 }
 
