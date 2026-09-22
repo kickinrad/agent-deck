@@ -128,3 +128,89 @@ func TestInstance_UpdateHookStatus_ClearRebind_BoundaryOneSecondBelowRejects(t *
 		t.Fatalf("expected reject event with reason=candidate_has_less_conversation_data; events=%+v", events)
 	}
 }
+
+// Claude's native SessionStart source=clear is an exact in-pane identity. It
+// must rebind immediately even when the old and new transcripts have nearly
+// identical mtimes; generic startup/resume events keep the flap guard.
+func TestInstance_UpdateHookStatus_ExplicitClearRebindsImmediately(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(tmpHome, ".claude"))
+	ClearUserConfigCache()
+	t.Cleanup(ClearUserConfigCache)
+
+	projectPath := filepath.Join(tmpHome, "project")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inst := NewInstanceWithTool("clear-native-identity", projectPath, "claude")
+	inst.managedClaudeRootCheck = func(int) bool { return true }
+	oldID := "5ea244ce-0000-0000-0000-000000000030"
+	newID := "2266314c-0000-0000-0000-000000000040"
+	oldPath := seedClaudeJSONL(t, inst, oldID, 200, 1024)
+	newPath := seedClaudeJSONL(t, inst, newID, 1, 8)
+	now := time.Now()
+	if err := os.Chtimes(oldPath, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(newPath, now, now); err != nil {
+		t.Fatal(err)
+	}
+	inst.ClaudeSessionID = oldID
+
+	inst.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: newID, Event: "SessionStart", Source: "clear", Cwd: projectPath, ClaudePID: 42, UpdatedAt: now})
+	if inst.ClaudeSessionID != newID {
+		t.Fatalf("explicit clear bound %q, want %q", inst.ClaudeSessionID, newID)
+	}
+
+	for _, source := range []string{"startup", "resume"} {
+		inst.ClaudeSessionID = oldID
+		inst.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: newID, Event: "SessionStart", Source: source, Cwd: projectPath, UpdatedAt: now.Add(time.Second)})
+		if inst.ClaudeSessionID != oldID {
+			t.Fatalf("source=%q bypassed clear-only guard: got %q want %q", source, inst.ClaudeSessionID, oldID)
+		}
+	}
+}
+
+func TestInstance_UpdateHookStatus_SameCwdSubagentClearCannotStealBinding(t *testing.T) {
+	inst := newGuardTestInstance(t, "clear-same-cwd-subagent")
+	oldID := "5ea244ce-0000-0000-0000-000000000032"
+	newID := "2266314c-0000-0000-0000-000000000042"
+	seedClaudeJSONL(t, inst, oldID, 200, 1024)
+	seedClaudeJSONL(t, inst, newID, 1, 8)
+	inst.ClaudeSessionID = oldID
+	// A child can share its parent's cwd and inherited AGENTDECK_INSTANCE_ID,
+	// but is not the root Claude process below this pane.
+	inst.managedClaudeRootCheck = func(pid int) bool { return pid == 42 }
+	inst.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: newID, Event: "SessionStart", Source: "clear", Cwd: inst.ProjectPath, ClaudePID: 99, UpdatedAt: time.Now()})
+	if inst.ClaudeSessionID != oldID {
+		t.Fatalf("same-cwd subagent clear rebound %q, want %q", inst.ClaudeSessionID, oldID)
+	}
+}
+
+func TestManagedRootClaudeProcessFromTable(t *testing.T) {
+	table := []byte("100 1 bash\n200 100 claude\n300 200 node\n400 300 claude\n")
+	if !isManagedRootClaudeProcessFromTable([]int{100}, 200, table) {
+		t.Fatal("root Claude process was not accepted")
+	}
+	if isManagedRootClaudeProcessFromTable([]int{100}, 400, table) {
+		t.Fatal("nested Claude subagent was accepted as the root")
+	}
+}
+
+func TestInstance_UpdateHookStatus_ExplicitClearForeignCwdCannotStealBinding(t *testing.T) {
+	inst := newGuardTestInstance(t, "clear-foreign-cwd")
+	oldID := "5ea244ce-0000-0000-0000-000000000031"
+	newID := "2266314c-0000-0000-0000-000000000041"
+	seedClaudeJSONL(t, inst, oldID, 200, 1024)
+	seedClaudeJSONL(t, inst, newID, 1, 8)
+	inst.ClaudeSessionID = oldID
+	foreign := filepath.Join(filepath.Dir(inst.ProjectPath), "helper")
+	if err := os.MkdirAll(foreign, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inst.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: newID, Event: "SessionStart", Source: "clear", Cwd: foreign, UpdatedAt: time.Now()})
+	if inst.ClaudeSessionID != oldID {
+		t.Fatalf("foreign clear rebound %q, want %q", inst.ClaudeSessionID, oldID)
+	}
+}
