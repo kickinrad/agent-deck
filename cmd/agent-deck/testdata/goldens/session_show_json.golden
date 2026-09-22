@@ -5,7 +5,7 @@
   "can_restart": true,
   "claude_session_id": "",
   "created_at": "<TIMESTAMP>",
-  "group": "my-sessions",
+  "group": "sessions",
   "hook_status": "",
   "hook_status_fresh": false,
   "id": "golden-sess-1",

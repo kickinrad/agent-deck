@@ -16,16 +16,16 @@
                              │  config.toml)                                              │
                              │    Tip: waiting / running / idle to filter by status       │
                              │                                                            │
-                             │    › session-01 (claude)  my-sessions · ?                  │
-                             │      session-02 (claude)  my-sessions · ?                  │
-                             │      session-03 (claude)  my-sessions · ?                  │
-                             │      session-04 (claude)  my-sessions · ?                  │
-                             │      session-05 (claude)  my-sessions · ?                  │
-                             │      session-06 (claude)  my-sessions · ?                  │
-                             │      session-07 (claude)  my-sessions · ?                  │
-                             │      session-08 (claude)  my-sessions · ?                  │
-                             │      session-09 (claude)  my-sessions · ?                  │
-                             │      session-10 (claude)  my-sessions · ?                  │
+                             │    › session-01 (claude)  sessions · ?                     │
+                             │      session-02 (claude)  sessions · ?                     │
+                             │      session-03 (claude)  sessions · ?                     │
+                             │      session-04 (claude)  sessions · ?                     │
+                             │      session-05 (claude)  sessions · ?                     │
+                             │      session-06 (claude)  sessions · ?                     │
+                             │      session-07 (claude)  sessions · ?                     │
+                             │      session-08 (claude)  sessions · ?                     │
+                             │      session-09 (claude)  sessions · ?                     │
+                             │      session-10 (claude)  sessions · ?                     │
                              │    11 results                                              │
                              │    [Enter] Select  [↑↓] Navigate                           │
                              │    [Tab] Global  [Esc] Cancel                              │

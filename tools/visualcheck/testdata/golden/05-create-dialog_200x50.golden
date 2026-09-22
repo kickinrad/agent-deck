@@ -10,7 +10,7 @@
                                                          │                                                                                    │
                                                          │    New Session                                                                     │
                                                          │                                                                                    │
-                                                         │      in group: alpha                                                               │
+                                                         │      in group: sessions                                                            │
                                                          │                                                                                    │
                                                          │    ▶ Name:                                                                         │
                                                          │      > opencode-idle                                                               │
@@ -24,7 +24,7 @@
                                                          │        > custom command                                                            │
                                                          │                                                                                    │
                                                          │      Path:                                                                         │
-                                                         │      > /tmp/vc-<tmp>                               │
+                                                         │      > /tmp/vc-<tmp>                                                  │
                                                          │                                                                                    │
                                                          │      Where: this machine                                                           │
                                                          │                                                                                    │

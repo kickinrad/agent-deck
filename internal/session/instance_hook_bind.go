@@ -4,12 +4,14 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/statedb"
+	"github.com/asheshgoplani/agent-deck/internal/tmux"
 )
 
 // UpdateClaudeSession updates the Claude session ID from tmux environment.
@@ -260,8 +262,15 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 			i.bindClaudeSessionFromHook(sessionID, hookSource, status.Event, "bind")
 			return
 		}
-		// v1.7.7 guard: candidate must have any conversation data at all.
-		if !sessionHasConversationData(i, sessionID) {
+		// Claude explicitly identifies an in-pane /clear with a SessionStart
+		// source="clear" event. When its cwd is exactly this instance's primary
+		// project, that native identity is stronger than the size/mtime heuristic:
+		// the new transcript may be smaller and not yet flushed. Other starts
+		// (including resume) remain subject to every established guard.
+		explicitClear := i.isExplicitClaudeClearStart(status)
+		// v1.7.7 guard: candidate must have any conversation data at all unless
+		// the owned native /clear identity above vouches for the fresh session.
+		if !explicitClear && !sessionHasConversationData(i, sessionID) {
 			// A different session id with NO conversation data on an established
 			// instance is a foreign ephemeral (a `claude -p` child that inherited
 			// our AGENTDECK_INSTANCE_ID) — it doesn't own this instance, so its
@@ -297,7 +306,7 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 		if sessionHasConversationData(i, i.ClaudeSessionID) {
 			currentSize := sessionConversationByteSize(i, i.ClaudeSessionID)
 			candidateSize := sessionConversationByteSize(i, sessionID)
-			if candidateSize <= currentSize {
+			if candidateSize <= currentSize && !explicitClear {
 				currentMtime := sessionConversationMtime(i, i.ClaudeSessionID)
 				candidateMtime := sessionConversationMtime(i, sessionID)
 				clearRebind := !currentMtime.IsZero() && !candidateMtime.IsZero() &&
@@ -367,6 +376,94 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 			i.bindGeminiSessionFromHook(sessionID, status.Event)
 		}
 	}
+}
+
+// isExplicitClaudeClearStart accepts only Claude's native /clear SessionStart
+// identity for this instance's exact primary project and managed root process.
+// It intentionally does not treat generic SessionStart, resume, or an empty
+// cwd as equivalent evidence.
+func (i *Instance) isExplicitClaudeClearStart(status *HookStatus) bool {
+	if status == nil || !strings.EqualFold(strings.TrimSpace(status.Event), "SessionStart") || !strings.EqualFold(strings.TrimSpace(status.Source), "clear") {
+		return false
+	}
+	if strings.TrimSpace(status.Cwd) == "" || strings.TrimSpace(i.ProjectPath) == "" {
+		return false
+	}
+	if normalizePath(status.Cwd) != normalizePath(i.ProjectPath) || status.ClaudePID <= 0 {
+		return false
+	}
+	if i.managedClaudeRootCheck != nil {
+		return i.managedClaudeRootCheck(status.ClaudePID)
+	}
+	return i.isManagedRootClaudeProcess(status.ClaudePID)
+}
+
+// isManagedRootClaudeProcess verifies that pid is the first Claude process
+// below one of this instance's tmux panes. A child Claude process can share the
+// same cwd and inherited AGENTDECK_INSTANCE_ID, but it follows the managed root
+// in the pane process tree and therefore cannot vouch for a /clear rebind.
+func (i *Instance) isManagedRootClaudeProcess(pid int) bool {
+	if pid <= 0 || i.tmuxSession == nil || !i.tmuxSession.Exists() {
+		return false
+	}
+	paneOutput, err := tmux.OutputBounded(i.TmuxSocketName, "list-panes", "-s", "-t", i.tmuxSession.Name, "-F", "#{pane_pid}")
+	if err != nil {
+		return false
+	}
+	panePIDs, err := parsePositivePIDs(paneOutput, "tmux pane")
+	if err != nil || len(panePIDs) == 0 {
+		return false
+	}
+	procTable, err := exec.Command("ps", "-eo", "pid=,ppid=,comm=").Output()
+	if err != nil || len(procTable) == 0 {
+		return false
+	}
+	return isManagedRootClaudeProcessFromTable(panePIDs, pid, procTable)
+}
+
+// isManagedRootClaudeProcessFromTable is the pure classification behind the
+// runtime probe. A malformed process snapshot fails closed: allowing an
+// unverified /clear would let a subagent overwrite its parent's binding.
+func isManagedRootClaudeProcessFromTable(panePIDs []int, candidatePID int, procTable []byte) bool {
+	if candidatePID <= 0 || len(panePIDs) == 0 {
+		return false
+	}
+	childrenByParent, err := parsePSParentChildMap(procTable)
+	if err != nil {
+		return false
+	}
+	commands := parsePSCommandNames(procTable)
+	type queued struct {
+		pid             int
+		rootClaudeFound bool
+	}
+	seen := make(map[int]bool)
+	queue := make([]queued, 0, len(panePIDs))
+	for _, panePID := range panePIDs {
+		if panePID > 0 && !seen[panePID] {
+			seen[panePID] = true
+			queue = append(queue, queued{pid: panePID})
+		}
+	}
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		isClaude := strings.Contains(strings.ToLower(commands[node.pid]), "claude")
+		if isClaude && !node.rootClaudeFound {
+			if node.pid == candidatePID {
+				return true
+			}
+			node.rootClaudeFound = true
+		}
+		for _, child := range childrenByParent[node.pid] {
+			if child <= 0 || seen[child] {
+				continue
+			}
+			seen[child] = true
+			queue = append(queue, queued{pid: child, rootClaudeFound: node.rootClaudeFound})
+		}
+	}
+	return false
 }
 
 // bindCodexSessionFromHook is the Codex counterpart of
