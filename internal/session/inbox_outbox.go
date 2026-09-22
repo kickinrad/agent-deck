@@ -56,6 +56,12 @@ const maxPendingTurnsPerChild = 64
 // retryable backpressure outcome; the inbox remains unchanged.
 var ErrInboxTurnOverflow = errors.New("inbox pending-turn limit reached")
 
+const wakeSubmissionUncertain = "uncertain"
+
+func isWakeActionable(ev TransitionNotificationEvent) bool {
+	return ev.Kind == transitionKindFinished
+}
+
 // capDoneSummary truncates an over-long completion summary to maxDoneSummaryBytes,
 // appending a marker so an operator sees the summary was clipped. Truncation is
 // byte-based (a multi-byte rune at the boundary is tolerated — the marker makes
@@ -165,6 +171,25 @@ func CommitToInbox(parentSessionID string, event TransitionNotificationEvent) er
 	inboxWriteMu.Lock()
 	defer inboxWriteMu.Unlock()
 
+	// Re-emitting the same explicit completion after a daemon restart must not
+	// discard its durable wake reservation. The record remains last-wins for its
+	// payload while retaining the conservative submission state.
+	if isWakeActionable(event) {
+		if prior, err := readInboxEventsLocked(path); err != nil {
+			return err
+		} else {
+			for _, existing := range prior {
+				if existing.ChildSessionID == event.ChildSessionID &&
+					existing.SourceRemote == event.SourceRemote &&
+					existing.TurnFingerprint == event.TurnFingerprint &&
+					existing.WakeSubmission != "" {
+					event.WakeSubmission = existing.WakeSubmission
+					break
+				}
+			}
+		}
+	}
+
 	pendingForChild, retry, err := pendingTurnsForChildLocked(path, event)
 	if err != nil {
 		return err
@@ -226,6 +251,86 @@ func pendingTurnsForChildLocked(path string, event TransitionNotificationEvent) 
 		return 0, false, err
 	}
 	return len(seen), retry, nil
+}
+
+// ReserveInboxWakeSubmission atomically records one attempted wake for a
+// pending completion. It returns false when that turn was already consumed,
+// already submitted, or is no longer pending. The durable "uncertain" marker
+// is intentional: a no-wait tmux submission has no acknowledgement that is
+// safe to treat as delivery, so retrying after a crash could duplicate input.
+func ReserveInboxWakeSubmission(parentSessionID, turnFingerprint string) (bool, error) {
+	if strings.TrimSpace(parentSessionID) == "" || strings.TrimSpace(turnFingerprint) == "" {
+		return false, nil
+	}
+
+	// Maintain the consumer's lock order (consumed turns before inbox) so a
+	// concurrent drain cannot move a record between the checks.
+	consumedTurnsMu.Lock()
+	defer consumedTurnsMu.Unlock()
+	if _, consumed := loadConsumedTurnsLocked(parentSessionID)[turnFingerprint]; consumed {
+		return false, nil
+	}
+
+	path := InboxPathFor(parentSessionID)
+	fileLock, err := AcquireConfigFileLock(path)
+	if err != nil {
+		return false, fmt.Errorf("lock inbox wake reservation: %w", err)
+	}
+	defer fileLock.Release()
+
+	inboxWriteMu.Lock()
+	defer inboxWriteMu.Unlock()
+
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	var lines [][]byte
+	reserved := false
+	for _, rawLine := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+		if strings.TrimSpace(rawLine) == "" {
+			continue
+		}
+		var wire inboxWireEvent
+		if err := json.Unmarshal([]byte(rawLine), &wire); err != nil {
+			lines = append(lines, []byte(rawLine)) // preserve corrupt/unknown lines
+			continue
+		}
+		ev := wire.TransitionNotificationEvent
+		if isWakeActionable(ev) && ev.TurnFingerprint == turnFingerprint && ev.WakeSubmission == "" {
+			ev.WakeSubmission = wakeSubmissionUncertain
+			wire.TransitionNotificationEvent = ev
+			updated, err := json.Marshal(wire)
+			if err != nil {
+				return false, err
+			}
+			lines = append(lines, updated)
+			reserved = true
+			continue
+		}
+		lines = append(lines, []byte(rawLine))
+	}
+	if !reserved {
+		return false, nil
+	}
+	data := []byte(strings.Join(byteLinesToStrings(lines), "\n") + "\n")
+	if err := writeFileDurable(path, data, 0o644); err != nil {
+		return false, err
+	}
+	delete(inboxFingerprintCache, path)
+	return true, nil
+}
+
+func byteLinesToStrings(lines [][]byte) []string {
+	out := make([]string, len(lines))
+	for i := range lines {
+		out[i] = string(lines[i])
+	}
+	return out
 }
 
 // appendInboxLineLocked marshals one event and atomically installs an old-or-new
@@ -534,7 +639,7 @@ func (n *TransitionNotifier) resolveParentIDForInbox(event TransitionNotificatio
 	}
 	// Top-level conductor self-suppress (issue #824 cause B): the root is not
 	// an orphan, drop silently.
-	if strings.TrimSpace(child.ParentSessionID) == "" && isConductorSessionTitle(child.Title) {
+	if strings.TrimSpace(child.ParentSessionID) == "" && isConductorInstance(child) {
 		return nil, false, deadLetterReasonSelfConductor
 	}
 	// Orphan-on-creation guard (issue #805 cause A): log one WARN per orphan.
@@ -542,7 +647,7 @@ func (n *TransitionNotifier) resolveParentIDForInbox(event TransitionNotificatio
 		n.logOrphanOnce(event, child.ID)
 		return nil, false, deadLetterReasonOrphan
 	}
-	if strings.TrimSpace(child.ParentSessionID) == child.ID && isConductorSessionTitle(child.Title) {
+	if strings.TrimSpace(child.ParentSessionID) == child.ID && isConductorInstance(child) {
 		return nil, false, deadLetterReasonSelfConductor
 	}
 	// Parent referenced but not present in this profile's registry: removed

@@ -24,6 +24,7 @@ func TestStatusFileWatcher_ProcessFile(t *testing.T) {
 		Status                   string `json:"status"`
 		SessionID                string `json:"session_id"`
 		Event                    string `json:"event"`
+		Source                   string `json:"source"`
 		Timestamp                int64  `json:"ts"`
 		CodexStartedGeneration   string `json:"codex_started_generation"`
 		CodexCompletedGeneration string `json:"codex_completed_generation"`
@@ -33,6 +34,7 @@ func TestStatusFileWatcher_ProcessFile(t *testing.T) {
 		Status:                   "running",
 		SessionID:                "abc-123",
 		Event:                    "UserPromptSubmit",
+		Source:                   "clear",
 		Timestamp:                time.Now().Unix(),
 		CodexStartedGeneration:   "thread:turn",
 		CodexCompletedGeneration: "thread:turn",
@@ -59,6 +61,9 @@ func TestStatusFileWatcher_ProcessFile(t *testing.T) {
 	}
 	if hs.Event != "UserPromptSubmit" {
 		t.Errorf("Event = %q, want UserPromptSubmit", hs.Event)
+	}
+	if hs.Source != "clear" {
+		t.Errorf("Source = %q, want clear", hs.Source)
 	}
 	if hs.CodexStartedGeneration != "thread:turn" || hs.CodexCompletedGeneration != "thread:turn" ||
 		hs.CodexStartedSessionID != "thread" || hs.CodexCompletedSessionID != "thread" {

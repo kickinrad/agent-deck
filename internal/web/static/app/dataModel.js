@@ -11,7 +11,8 @@ import { computed } from '@preact/signals'
 import { sessionsSignal, sessionCostsSignal, selectedIdSignal, selectedGroupSignal, createSessionDialogSignal, archivedSessionsSignal } from './state.js'
 import { sidebarFilterSignal, groupExpandedSignal, statusFiltersSignal } from './uiState.js'
 
-// kind heuristic from session metadata (no API field today).
+// Keep the legacy presentation convention; delegation capability comes from
+// actual parent links and does not promote ordinary sessions to a special kind.
 // `tool` is `claude|codex|gemini|shell|webhook|...`; treat anything not in
 // the agent set as a watcher. Conductor is detected by group convention.
 function deriveKind(s) {
