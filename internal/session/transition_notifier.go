@@ -97,6 +97,12 @@ type TransitionNotificationEvent struct {
 	// Timestamp. Format: "<child_id>@<turn-signal-hash>".
 	TurnFingerprint string `json:"turn_fingerprint,omitempty"`
 
+	// WakeSubmission records that a completion's idle wake was submitted. The
+	// submission is deliberately durable before dispatch: send --no-wait cannot
+	// prove whether tmux accepted an ambiguous request, so a daemon restart must
+	// not blindly submit the same completion again.
+	WakeSubmission string `json:"wake_submission,omitempty"`
+
 	// Attempts counts producer commit attempts against an unresolvable target
 	// before the record is moved to the dead-letter store (issue #1225). Bounds
 	// the old dropped_no_target ~1/sec runaway to a terminal state.

@@ -206,8 +206,10 @@ func TestSessionsCollectionPOSTCreatesSession(t *testing.T) {
 		WebMutations: true,
 	})
 	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+	var gotGroup string
 	srv.mutator = &fakeMutator{
 		createSessionFn: func(title, tool, projectPath, groupPath, modelID, reasoningEffort string) (string, error) {
+			gotGroup = groupPath
 			return "new-id", nil
 		},
 	}
@@ -223,6 +225,9 @@ func TestSessionsCollectionPOSTCreatesSession(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "new-id") {
 		t.Errorf("expected session id in response, got: %s", rr.Body.String())
+	}
+	if gotGroup != session.DefaultGroupPath {
+		t.Errorf("implicit root group = %q, want %q", gotGroup, session.DefaultGroupPath)
 	}
 }
 

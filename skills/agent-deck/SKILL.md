@@ -62,12 +62,12 @@ Read the matching reference before acting on anything beyond the commands above.
 |---|---|
 | What agent-deck and each session's CLI (claude, codex, gemini) can do; choosing the `-c` tool for a child | [capabilities.md](references/capabilities.md) |
 | Sessions messaging each other, `send` delivery guarantees, `output`, `children`, `inbox drain`, `handoff`, send pitfalls | [session-communication.md](references/session-communication.md) |
-| Launching a sub-agent (`launch-subagent.sh`), retrieval modes, worker prompt conventions, the `===AGENTDECK_DONE===` completion sentinel, consulting Codex or Gemini, root-level peers (`-no-parent`) | [sub-agents.md](references/sub-agents.md) |
+| Launching a sub-agent (`launch-subagent.sh`), retrieval modes, worker prompt conventions, the `===AGENTDECK_DONE===` completion sentinel, consulting Codex or Gemini, independent roots vs explicit children | [sub-agents.md](references/sub-agents.md) |
 | Fanning out several children and supervising them non-blockingly | [fleet skill](../fleet/SKILL.md) |
 | Conductors (`conductor setup`), Telegram/Slack channels, watchers (webhook, GitHub, ntfy, Slack) | [conductors.md](references/conductors.md), then [documentation/WATCHERS.md](https://github.com/asheshgoplani/agent-deck/blob/main/documentation/WATCHERS.md) for custom watchers |
 | Context inspection (`session context`), worktrees, scratch sessions (`try`), runtime health (`health`, dead letters, `remote update --from-build`), recall hints and search, session sharing, switching a session to another Claude account | [session-workflows.md](references/session-workflows.md) |
 | Self-improvement (transcript mining), goals (goal-driven worker autonomy), trust-but-verify for completion claims | [autonomy.md](references/autonomy.md), then [self-improvement.md](references/self-improvement.md) or [goal.md](references/goal.md) for the deep dive |
-| Using agent-deck as a daemon supervisor (it is not one), known gotchas and workarounds (`--no-wait` Enter fallback, `text file busy`, `-c "claude <subcommand>"`, config drift, channel subscription, Telegram conductor topology, v1.9.x findings), and what needs a deck newer than 1.16.11 | [gotchas.md](references/gotchas.md) |
+| Using agent-deck as a daemon supervisor (it is not one), known gotchas and workarounds (`--no-wait` readiness race, `text file busy`, `-c "claude <subcommand>"`, config drift, channel subscription, Telegram conductor topology, v1.9.x findings), and what needs a deck newer than 1.16.11 | [gotchas.md](references/gotchas.md) |
 | TUI keys, dialogs, search, and layout | [tui-reference.md](references/tui-reference.md) |
 | A session in error, MCPs not loading, diagnostics, getting help, or filing a bug | [troubleshooting.md](references/troubleshooting.md) |
 | Docker sandboxed sessions | [sandbox.md](references/sandbox.md) |

@@ -74,15 +74,10 @@ func handleLaunchCommand(profile string, args []string, inspectFlags func(*flag.
 	noWait := fs.Bool("no-wait", false, "Don't wait for agent to be ready before sending message")
 	assertDone := fs.Bool("assert-done", false, "Append a completion-sentinel instruction to the message (default on for -c claude)")
 	noAssertDone := fs.Bool("no-assert-done", false, "Disable the completion-sentinel instruction")
-	parent := fs.String("parent", "", "Parent session (creates sub-session; group is cwd-derived by default — auto-inherits the parent's group for git worktree children or with --inherit-group)")
+	parent := fs.String("parent", "", "Parent session (creates a child in the parent's group unless --group is supplied)")
 	parentShort := fs.String("p", "", "Parent session (short)")
 	noParent := fs.Bool("no-parent", false, "Disable automatic parent linking")
-	// Keep a fanned-out child in the parent's group instead of the cwd-derived
-	// group. Without this, a child launched into a worktree (.worktrees/<branch>)
-	// derives its group from that leaf folder and lands in a per-branch group
-	// detached from the parent. Opt-in so #972 (conductor children -> project
-	// group) is preserved by default. Used by the fleet skill.
-	inheritGroup := fs.Bool("inherit-group", false, "Place the child in the parent session's group instead of the cwd-derived group (auto-applied for git worktree children; use this to force it for non-worktree paths)")
+	fs.Bool("inherit-group", false, "Deprecated compatibility flag; children already inherit their parent group unless --group is supplied")
 	noTransitionNotify := fs.Bool("no-transition-notify", false, "Suppress transition event notifications to parent session")
 	// #697: conductor-friendly title lock. Prevents Claude's session name
 	// from overwriting the agent-deck title. An explicit -t/--title already
@@ -348,7 +343,7 @@ func handleLaunchCommand(profile string, args []string, inspectFlags func(*flag.
 		os.Exit(1)
 	}
 	var queryGroup string
-	if err := validateStartupQueryCapacity(profile, sessionGroup, sessionParent, path, *noParent, *inheritGroup || wtBranch != "", *startupQuery != "", &queryGroup); err != nil {
+	if err := validateStartupQueryCapacity(profile, sessionGroup, sessionParent, path, true, true, *startupQuery != "", &queryGroup); err != nil {
 		out.Error(err.Error(), ErrCodeInvalidOperation)
 		os.Exit(1)
 	}
@@ -466,34 +461,17 @@ func handleLaunchCommand(profile string, args []string, inspectFlags func(*flag.
 		os.Exit(1)
 	}
 
-	// Resolve parent session if specified.
-	// Issue #972: when no explicit -g is passed, prefer the cwd-derived
-	// project group over the parent's group, so conductor-spawned children
-	// land in the project group (e.g. `agent-deck`) instead of the
-	// conductor's own group (`conductor`). The parent group is now a
-	// fallback for path mappings that produce no group.
-	cwdDerivedGroup := session.GroupPathForProject(path)
-	// A worktree child auto-inherits its parent's group (issue: fleets fanned
-	// into worktrees scattered into junk per-branch / `worktrees` groups, or
-	// a deliberately-named group, detached from the parent). `path` is already
-	// the final worktree path here (the -w branch above reassigns it before
-	// this point). git.IsLinkedWorktree returns false for main working trees,
-	// so #972's conductor children (separate real repos) keep cwd-derived group.
-	// The thunk defers the git probe until shouldInheritParentGroup needs it.
-	inheritParentGroup := shouldInheritParentGroup(explicitGroupProvided, *inheritGroup, func() bool {
-		return git.IsLinkedWorktree(path)
-	})
-	parentInstance, launchedBy, parentNote, parentErr := selectLaunchParent(sessionParent, *noParent, launchNestUnderParent(), instances)
+	// Roots are independent by default: launch links only an explicit
+	// --parent (no automatic caller parent, no nesting), and a child belongs
+	// in its parent's sidebar group unless the caller supplied --group.
+	parentInstance, launchedBy, _, parentErr := selectLaunchParent(sessionParent, true, false, instances)
 	if parentErr != nil {
 		message, code := launchParentErrorParts(parentErr)
 		out.Error(message, code)
 		os.Exit(1)
 	}
-	if parentNote != "" {
-		fmt.Fprintln(os.Stderr, parentNote)
-	}
-	if parentInstance != nil {
-		sessionGroup = resolveGroupSelection(sessionGroup, cwdDerivedGroup, parentInstance.GroupPath, explicitGroupProvided, inheritParentGroup)
+	if parentInstance != nil && !explicitGroupProvided {
+		sessionGroup = parentInstance.GroupPath
 	}
 
 	// Default title to folder name
