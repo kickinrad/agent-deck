@@ -8,7 +8,7 @@
       "auto_name_description": "",
       "command": "",
       "created_at": 1790078400,
-      "group_path": "my-sessions",
+      "group_path": "sessions",
       "id": "golden-sess-1",
       "is_conductor": 0,
       "last_accessed": 1790078400,
@@ -38,7 +38,7 @@
       "auto_name_description": "",
       "command": "",
       "created_at": 1790078460,
-      "group_path": "my-sessions",
+      "group_path": "sessions",
       "id": "golden-sess-2",
       "is_conductor": 0,
       "last_accessed": 1790078460,
@@ -188,7 +188,7 @@
       "auto_name_description": "",
       "command": "",
       "created_at": 1790078400,
-      "group_path": "my-sessions",
+      "group_path": "sessions",
       "id": "golden-sess-shell",
       "is_conductor": 0,
       "last_accessed": "\u003cVOLATILE_LAST_ACCESSED\u003e",
@@ -232,8 +232,8 @@
       "default_path": "",
       "expanded": 1,
       "max_concurrent": 0,
-      "name": "My Sessions",
-      "path": "my-sessions",
+      "name": "sessions",
+      "path": "sessions",
       "sort_order": 0
     }
   ]
