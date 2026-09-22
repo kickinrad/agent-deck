@@ -148,10 +148,8 @@ test.describe('children panel: UI rendering', () => {
     expect(Number(grandDepth)).toBeGreaterThan(Number(childBDepth))
   })
 
-  test('non-conductor session does NOT render the children card (UI gate)', async ({ page, request }) => {
-    // sess-001 is a normal claude session — not promoted to conductor by
-    // deriveKind, so the panel must not appear even though the toggle is
-    // on by default. Visual baselines depend on this invariant.
+  test('ordinary session shows the children card only after explicit delegation', async ({ page, request }) => {
+    // Ordinary roots can own children without becoming a special session type.
     await request.post('/__fixture/reset')
     await page.goto('/s/sess-001')
     await page.waitForSelector('.sess', { timeout: 5000 })
@@ -159,6 +157,9 @@ test.describe('children panel: UI rendering', () => {
 
     const childrenCard = page.locator('.card', { hasText: 'CHILDREN' })
     await expect(childrenCard).toHaveCount(0)
+    const fork = await request.post('/api/sessions/sess-001/fork')
+    expect(fork.status()).toBe(200)
+    await expect(childrenCard).toHaveCount(1)
   })
 
   test('live updates: new fork appears in the tree within ~1s', async ({ page, request }) => {
