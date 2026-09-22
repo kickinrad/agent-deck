@@ -2,7 +2,7 @@ Groups:
 
 NAME                 SESSIONS   STATUS
 --------------------------------------------------
-My Sessions          2          
+sessions             2          
 Backend              4          
   └── API            2          
 

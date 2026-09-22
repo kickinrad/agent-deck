@@ -78,7 +78,7 @@ func TestRemoteMoveToGroup_MKeyOpensDialogWithRemoteGroups(t *testing.T) {
 	// The dialog must offer the remote's own groups (normalized, sorted,
 	// deduped) — not the local group tree, which knows nothing about the
 	// remote. Empty remote group normalizes to the default group path.
-	want := []string{"my-sessions", "personal", "work"}
+	want := []string{"personal", "sessions", "work"}
 	got := home.groupDialog.groupPaths
 	if len(got) != len(want) {
 		t.Fatalf("dialog offered %d group paths %v, want %d %v", len(got), got, len(want), want)
@@ -112,8 +112,8 @@ func TestRemoteMoveToGroup_MKeyIncludesEmptyGroups(t *testing.T) {
 	}
 
 	// Union of the remote's own group list (incl. the empty folder) and the
-	// session-derived groups (empty remote group normalizes to my-sessions).
-	want := []string{"empty-folder", "my-sessions", "personal", "work"}
+	// session-derived groups (empty remote group normalizes to sessions).
+	want := []string{"empty-folder", "personal", "sessions", "work"}
 	got := home.groupDialog.groupPaths
 	if len(got) != len(want) {
 		t.Fatalf("dialog offered %d group paths %v, want %d %v", len(got), got, len(want), want)

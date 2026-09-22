@@ -7,7 +7,7 @@
                  │                                                                                    │
                  │    New Session                                                                     │
                  │                                                                                    │
-                 │      in group: alpha                                                               │
+                 │      in group: sessions                                                            │
                  │                                                                                    │
                  │    ▶ Name:                                                                         │
                  │      > session-name                                                                │
@@ -20,7 +20,7 @@
                  │        > custom command                                                            │
                  │                                                                                    │
                  │      Path:                                                                         │
-                 │      > /tmp/vc-<tmp>                               │
+                 │      > /tmp/vc-<tmp>                                                  │
                  │                                                                                    │
                  │      [ ] Create in worktree                                                        │
                  │      [ ] Run in Docker sandbox                                                     │

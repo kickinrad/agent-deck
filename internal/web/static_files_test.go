@@ -401,6 +401,9 @@ func TestCreateSessionDialogUsesModelIDCatalog(t *testing.T) {
 		"anthropic/claude-sonnet-4-6",
 		"anthropic/claude-opus-4-8",
 		"Custom model ID",
+		"<label>GROUP</label>",
+		"groupPath",
+		"menuModelSignal",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("CreateSessionDialog.js + modelCatalog.js missing %q", want)

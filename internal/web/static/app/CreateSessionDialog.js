@@ -13,6 +13,7 @@ import { displayLabelForTool, resolveCreateSessionPickerTools } from './pickerTo
 import {
   CUSTOM_MODEL, effortOptionsForTool, modelOptionsForTool, seedModelSelection,
 } from './modelCatalog.js'
+import { menuModelSignal } from './dataModel.js'
 
 export function CreateSessionDialog() {
   const open = createSessionDialogSignal.value
@@ -24,6 +25,8 @@ export function CreateSessionDialog() {
   const [customModel, setCustomModel] = useState('')
   const [reasoningEffort, setReasoningEffort] = useState('')
   const [path, setPath] = useState('')
+  // Empty delegates root placement to the server's built-in sessions group.
+  const [groupPath, setGroupPath] = useState('')
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
   const [seededFor, setSeededFor] = useState(null)
@@ -44,6 +47,7 @@ export function CreateSessionDialog() {
     const seedTool = shownTools.includes(ctx.tool) ? ctx.tool : shownTools[0]
     setTool(seedTool)
     setPath(ctx.defaultPath || '')
+    setGroupPath(ctx.groupPath || '')
     // A known id selects its option; an unknown one (newer than this build's
     // list) is carried as a custom id instead of silently dropped (#2388).
     const seeded = seedModelSelection(seedTool, ctx.modelId, modelCatalogSignal.value)
@@ -66,7 +70,7 @@ export function CreateSessionDialog() {
     setSubmitting(true)
     try {
       const payload = { title, tool, projectPath: path }
-      if (ctx.groupPath) payload.groupPath = ctx.groupPath
+      if (groupPath) payload.groupPath = groupPath
       const modelId = selectedModelId()
       if (modelId) payload.modelId = modelId
       if (effectiveEffort) payload.reasoningEffort = effectiveEffort
@@ -98,6 +102,7 @@ export function CreateSessionDialog() {
   // The options change with the model (select or custom id) and with the
   // settings hydration; an effort they no longer offer is never submitted.
   const effectiveEffort = reasoningEfforts.some(e => e.value === reasoningEffort) ? reasoningEffort : ''
+  const groups = menuModelSignal.value.groups || []
   const needsCustomModel = modelId === CUSTOM_MODEL
   const submitDisabled = submitting || !title || !path || (needsCustomModel && !customModel.trim())
 
@@ -125,6 +130,15 @@ export function CreateSessionDialog() {
           <div class="field">
             <label>WORKING DIR</label>
             <input required value=${path} onInput=${e => setPath(e.target.value)} placeholder="/absolute/path/to/project"/>
+          </div>
+          <div class="field">
+            <label>GROUP</label>
+            <select value=${groupPath} onInput=${e => setGroupPath(e.target.value)}>
+          <option value="">DEFAULT GROUP</option>
+              ${groups.filter(g => g.path && g.path !== 'default').map(g => html`
+                <option key=${g.path} value=${g.path}>${g.label || g.path}</option>
+              `)}
+            </select>
           </div>
           <div class="field">
             <label>TOOL</label>

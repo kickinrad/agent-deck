@@ -413,6 +413,9 @@ type rawHookStatus struct {
 	Status                   string `json:"status"`
 	SessionID                string `json:"session_id"`
 	Event                    string `json:"event"`
+	Source                   string `json:"source"`
+	Cwd                      string `json:"cwd"`
+	ClaudePID                int    `json:"claude_pid"`
 	Timestamp                int64  `json:"ts"`
 	CodexStartedGeneration   string `json:"codex_started_generation"`
 	CodexCompletedGeneration string `json:"codex_completed_generation"`
@@ -482,6 +485,9 @@ func defaultLoadHookStatuses() map[string]*session.HookStatus {
 			Status:                   parsed.Status,
 			SessionID:                parsed.SessionID,
 			Event:                    parsed.Event,
+			Source:                   parsed.Source,
+			Cwd:                      parsed.Cwd,
+			ClaudePID:                parsed.ClaudePID,
 			UpdatedAt:                updatedAt,
 			CodexStartedGeneration:   parsed.CodexStartedGeneration,
 			CodexCompletedGeneration: parsed.CodexCompletedGeneration,
