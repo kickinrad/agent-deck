@@ -62,6 +62,16 @@ func TestUserConfig_DefaultPathTOML(t *testing.T) {
 	}
 }
 
+func TestUserConfig_DefaultGroupTOML(t *testing.T) {
+	var cfg UserConfig
+	if _, err := toml.Decode("default_group = \"sessions\"\n", &cfg); err != nil {
+		t.Fatalf("toml decode: %v", err)
+	}
+	if got := cfg.DefaultGroup; got != "sessions" {
+		t.Fatalf("DefaultGroup = %q, want sessions", got)
+	}
+}
+
 func TestGetCodexCommand_DefaultAndConfig(t *testing.T) {
 	tempDir := t.TempDir()
 	originalHome := os.Getenv("HOME")

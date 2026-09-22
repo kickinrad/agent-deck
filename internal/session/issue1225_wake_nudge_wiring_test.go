@@ -45,7 +45,8 @@ func newWakeNudgeFixture(t *testing.T) (*TransitionNotifier, string, TransitionN
 	}
 	parent := &Instance{
 		ID:          parentID,
-		Title:       "orchestrator",
+		Title:       "atlas",
+		IsConductor: true,
 		ProjectPath: "/tmp/p",
 		GroupPath:   DefaultGroupPath,
 		Tool:        "claude",
@@ -64,6 +65,56 @@ func newWakeNudgeFixture(t *testing.T) (*TransitionNotifier, string, TransitionN
 		DoneSummary:    "done",
 	}
 	return NewTransitionNotifier(), parentID, event
+}
+
+// A completion that arrives while a Codex conductor is busy remains pending.
+// The daemon observes idle later and submits exactly one wake; the inbox marker
+// survives a fresh notifier so restart cannot submit the same turn again.
+func TestIssue1225_BusyCodexCompletionReconcilesOnceAfterIdle(t *testing.T) {
+	n, parentID, event := newWakeNudgeFixture(t)
+	parent := &Instance{ID: parentID, Title: "atlas", IsConductor: true, Status: StatusRunning}
+	sent := 0
+	idle := false
+	n.wake = &wakeNudgeWiring{
+		nudger: NewWakeNudger(0),
+		now:    func() time.Time { return time.Unix(4000, 0) },
+		isIdle: func(*Instance) bool { return idle },
+		send:   func(*Instance, string) error { sent++; return nil },
+	}
+	if result := n.NotifyFinished(event); result.DeliveryResult != transitionDeliveryCommitted {
+		t.Fatalf("busy completion = %q, want %q", result.DeliveryResult, transitionDeliveryCommitted)
+	}
+	if sent != 0 {
+		t.Fatalf("busy completion sent %d wakes, want 0", sent)
+	}
+
+	d := NewTransitionDaemon()
+	d.notifier = n
+	parent.Status = StatusIdle
+	idle = true
+	d.reconcilePendingInboxWakes(event.Profile, map[string]*Instance{parentID: parent}, map[string]string{parentID: string(StatusIdle)})
+	if sent != 1 {
+		t.Fatalf("idle reconciliation sent %d wakes, want 1", sent)
+	}
+	records := readInboxLines(t, parentID)
+	if len(records) != 1 || records[0].WakeSubmission != wakeSubmissionUncertain {
+		t.Fatalf("wake reservation not durable: %+v", records)
+	}
+
+	// A fresh notifier models a daemon restart. The persisted reservation blocks
+	// a second send even though this process has an empty in-memory debounce map.
+	restarted := NewTransitionNotifier()
+	restarted.wake = &wakeNudgeWiring{
+		nudger: NewWakeNudger(0),
+		now:    func() time.Time { return time.Unix(4001, 0) },
+		isIdle: func(*Instance) bool { return idle },
+		send:   func(*Instance, string) error { sent++; return nil },
+	}
+	d.notifier = restarted
+	d.reconcilePendingInboxWakes(event.Profile, map[string]*Instance{parentID: parent}, map[string]string{parentID: string(StatusIdle)})
+	if sent != 1 {
+		t.Fatalf("restart re-submitted completion: sent=%d, want 1", sent)
+	}
 }
 
 // A successful commit fires exactly one wake-nudge, aimed at the resolved parent.
@@ -112,6 +163,32 @@ func TestIssue1225_CommitDoesNotNudgeBusyParent(t *testing.T) {
 	}
 	if sent != 0 {
 		t.Fatalf("busy parent: send called %d times, want 0", sent)
+	}
+}
+
+// Ordinary turn telemetry remains durable for an ordinary parent, but never
+// wakes an idle parent. Only NotifyFinished carries the explicit sentinel that
+// may interrupt.
+func TestIssue1225_TransitionCommitsWithoutWake(t *testing.T) {
+	n, parentID, event := newWakeNudgeFixture(t)
+	sent := 0
+	n.wake = &wakeNudgeWiring{
+		nudger: NewWakeNudger(0),
+		now:    func() time.Time { return time.Unix(1000, 0) },
+		isIdle: func(*Instance) bool { return true },
+		send:   func(*Instance, string) error { sent++; return nil },
+	}
+	event.FromStatus, event.ToStatus = string(StatusRunning), string(StatusWaiting)
+	event.DoneStatus, event.DoneSummary = "", ""
+	result := n.NotifyTransition(event)
+	if result.DeliveryResult != transitionDeliveryCommitted {
+		t.Fatalf("transition result = %q, want %q", result.DeliveryResult, transitionDeliveryCommitted)
+	}
+	if sent != 0 {
+		t.Fatalf("routine transition woke parent %d times, want 0", sent)
+	}
+	if records := readInboxLines(t, parentID); len(records) != 1 || records[0].Kind == transitionKindFinished {
+		t.Fatalf("routine telemetry was not retained as a transition: %+v", records)
 	}
 }
 
@@ -164,7 +241,7 @@ func TestIssue1225_DefaultWiringUsesConductorIdleGate(t *testing.T) {
 	if w == nil || w.nudger == nil || w.now == nil || w.isIdle == nil || w.send == nil {
 		t.Fatalf("default wiring must populate every hook, got %+v", w)
 	}
-	if !w.isIdle(&Instance{ID: "c", Title: "conductor-x", Status: StatusIdle}) {
+	if !w.isIdle(&Instance{ID: "c", Title: "renamed-atlas", IsConductor: true, Status: StatusIdle}) {
 		t.Fatal("default wiring must nudge an idle conductor")
 	}
 	if w.isIdle(&Instance{ID: "c", Title: "conductor-x", Status: StatusRunning}) {
@@ -179,18 +256,19 @@ func TestIssue1225_DefaultWiringUsesConductorIdleGate(t *testing.T) {
 // and only green when the pane is idle/waiting (not mid-turn).
 func TestIssue1225_ParentIsNudgeableIdle(t *testing.T) {
 	cases := []struct {
-		title  string
-		status Status
-		want   bool
+		title       string
+		isConductor bool
+		status      Status
+		want        bool
 	}{
-		{"conductor-x", StatusIdle, true},
-		{"conductor-x", StatusWaiting, true},
-		{"conductor-x", StatusRunning, false}, // busy: send-keys would only queue
-		{"worker", StatusIdle, false},         // non-conductor leaf: no inbox drain → noise
-		{"conductor-x", StatusError, false},
+		{"conductor-x", false, StatusIdle, true}, // legacy title fallback
+		{"renamed-atlas", true, StatusWaiting, true},
+		{"renamed-atlas", true, StatusRunning, false}, // busy: send-keys would only queue
+		{"worker", false, StatusIdle, false},          // non-conductor leaf: no inbox drain → noise
+		{"renamed-atlas", true, StatusError, false},
 	}
 	for _, c := range cases {
-		p := &Instance{ID: "p", Title: c.title, Status: c.status}
+		p := &Instance{ID: "p", Title: c.title, IsConductor: c.isConductor, Status: c.status}
 		if got := parentIsNudgeableIdle(p); got != c.want {
 			t.Errorf("parentIsNudgeableIdle(title=%q,status=%q)=%v, want %v", c.title, c.status, got, c.want)
 		}

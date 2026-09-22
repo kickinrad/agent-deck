@@ -6546,8 +6546,15 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 			i.bindClaudeSessionFromHook(sessionID, hookSource, status.Event, "bind")
 			return
 		}
-		// v1.7.7 guard: candidate must have any conversation data at all.
-		if !sessionHasConversationData(i, sessionID) {
+		// Claude explicitly identifies an in-pane /clear with a SessionStart
+		// source="clear" event. When its cwd is exactly this instance's primary
+		// project, that native identity is stronger than the size/mtime heuristic:
+		// the new transcript may be smaller and not yet flushed. Other starts
+		// (including resume) remain subject to every established guard.
+		explicitClear := i.isExplicitClaudeClearStart(status)
+		// v1.7.7 guard: candidate must have any conversation data at all unless
+		// the owned native /clear identity above vouches for the fresh session.
+		if !explicitClear && !sessionHasConversationData(i, sessionID) {
 			// A different session id with NO conversation data on an established
 			// instance is a foreign ephemeral (a `claude -p` child that inherited
 			// our AGENTDECK_INSTANCE_ID) — it doesn't own this instance, so its
@@ -6582,7 +6589,7 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 		if sessionHasConversationData(i, i.ClaudeSessionID) {
 			currentSize := sessionConversationByteSize(i, i.ClaudeSessionID)
 			candidateSize := sessionConversationByteSize(i, sessionID)
-			if candidateSize <= currentSize {
+			if candidateSize <= currentSize && !explicitClear {
 				currentMtime := sessionConversationMtime(i, i.ClaudeSessionID)
 				candidateMtime := sessionConversationMtime(i, sessionID)
 				clearRebind := !currentMtime.IsZero() && !candidateMtime.IsZero() &&
@@ -6632,6 +6639,19 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 			i.bindGeminiSessionFromHook(sessionID, status.Event)
 		}
 	}
+}
+
+// isExplicitClaudeClearStart accepts only Claude's native /clear SessionStart
+// identity for this instance's exact primary project. It intentionally does not
+// treat generic SessionStart, resume, or an empty cwd as equivalent evidence.
+func (i *Instance) isExplicitClaudeClearStart(status *HookStatus) bool {
+	if status == nil || !strings.EqualFold(strings.TrimSpace(status.Event), "SessionStart") || !strings.EqualFold(strings.TrimSpace(status.Source), "clear") {
+		return false
+	}
+	if strings.TrimSpace(status.Cwd) == "" || strings.TrimSpace(i.ProjectPath) == "" {
+		return false
+	}
+	return normalizePath(status.Cwd) == normalizePath(i.ProjectPath)
 }
 
 // bindCodexSessionFromHook is the Codex counterpart of

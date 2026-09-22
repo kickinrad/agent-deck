@@ -65,6 +65,12 @@ func defaultWakeNudgeWiring() *wakeNudgeWiring {
 // panic in the injected probe/send is recovered so a wake bug can never take
 // down the producer.
 func (n *TransitionNotifier) fireWakeNudge(parent *Instance, event TransitionNotificationEvent) {
+	// Status transitions are retained as durable telemetry for ordinary parents,
+	// but they do not prove task completion or an actionable question/blocker.
+	// Only the explicit worker completion sentinel may interrupt an idle parent.
+	if event.Kind != transitionKindFinished {
+		return
+	}
 	w := n.wake
 	if w == nil || w.nudger == nil || parent == nil {
 		return
@@ -76,19 +82,38 @@ func (n *TransitionNotifier) fireWakeNudge(parent *Instance, event TransitionNot
 		}
 	}()
 
+	profile := event.Profile
+	// Never reserve a send while the parent is busy or held. The daemon will
+	// inspect the pending completion again after status becomes idle.
+	if w.isIdle == nil || !w.isIdle(parent) {
+		return
+	}
+	if event.TurnFingerprint == "" {
+		event.TurnFingerprint = TurnFingerprint(event)
+	}
+	// Persist the one uncertain submission before dispatch. A no-wait send
+	// cannot distinguish a rejected pane from an accepted one after a crash, so
+	// the safe recovery behavior is to retain the inbox record but not resend.
+	reserved, err := ReserveInboxWakeSubmission(parent.ID, event.TurnFingerprint)
+	if err != nil {
+		commsLog.Warn("wake_nudge_reservation_failed",
+			slog.String("parent", parent.ID), slog.String("error", err.Error()))
+		return
+	}
+	if !reserved {
+		return
+	}
 	now := time.Now()
 	if w.now != nil {
 		now = w.now()
 	}
-	profile := event.Profile
-	isIdle := func() bool { return w.isIdle != nil && w.isIdle(parent) }
 	send := func() error {
 		if w.send == nil {
 			return nil
 		}
 		return w.send(parent, profile)
 	}
-	if _, err := w.nudger.Nudge(parent.ID, now, isIdle, send); err != nil {
+	if _, err := w.nudger.Nudge(parent.ID, now, func() bool { return true }, send); err != nil {
 		// Best-effort: a failed wake is harmless. Log once at debug-ish level so
 		// the operator can see WHY a pane wasn't woken without it being an error.
 		commsLog.Warn("wake_nudge_send_failed",
@@ -108,7 +133,7 @@ func (n *TransitionNotifier) fireWakeNudge(parent *Instance, event TransitionNot
 // moments earlier on the commit path, so a second tmux round-trip would add cost
 // without adding freshness.
 func parentIsNudgeableIdle(parent *Instance) bool {
-	if parent == nil || !isConductorSessionTitle(parent.Title) {
+	if !isConductorInstance(parent) {
 		return false
 	}
 	switch parent.Status {

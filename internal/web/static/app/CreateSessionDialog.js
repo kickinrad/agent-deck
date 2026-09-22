@@ -10,6 +10,7 @@ import {
 import { Icon, ICONS } from './icons.js'
 import { apiFetch } from './api.js'
 import { displayLabelForTool, resolveCreateSessionPickerTools } from './pickerTools.js'
+import { menuModelSignal } from './dataModel.js'
 
 const CUSTOM_MODEL = '__custom__'
 
@@ -112,6 +113,8 @@ export function CreateSessionDialog() {
   const [customModel, setCustomModel] = useState('')
   const [reasoningEffort, setReasoningEffort] = useState('')
   const [path, setPath] = useState('')
+  // Empty delegates root placement to the server's configured default_group.
+  const [groupPath, setGroupPath] = useState('')
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
 
@@ -125,7 +128,7 @@ export function CreateSessionDialog() {
     setError(null)
     setSubmitting(true)
     try {
-      const payload = { title, tool, projectPath: path }
+      const payload = { title, tool, projectPath: path, groupPath }
       const modelId = selectedModelId()
       if (modelId) payload.modelId = modelId
       if (reasoningEffort) payload.reasoningEffort = reasoningEffort
@@ -155,6 +158,7 @@ export function CreateSessionDialog() {
   const modelIDs = modelIDsForTool(tool)
   const reasoningEfforts = reasoningEffortsForTool(tool)
   const shownTools = resolveCreateSessionPickerTools(pickerToolsSignal.value)
+  const groups = menuModelSignal.value.groups || []
   const needsCustomModel = modelId === CUSTOM_MODEL
   const submitDisabled = submitting || !title || !path || (needsCustomModel && !customModel.trim())
 
@@ -176,6 +180,15 @@ export function CreateSessionDialog() {
           <div class="field">
             <label>WORKING DIR</label>
             <input required value=${path} onInput=${e => setPath(e.target.value)} placeholder="/absolute/path/to/project"/>
+          </div>
+          <div class="field">
+            <label>GROUP</label>
+            <select value=${groupPath} onInput=${e => setGroupPath(e.target.value)}>
+          <option value="">DEFAULT GROUP</option>
+              ${groups.filter(g => g.path && g.path !== 'default').map(g => html`
+                <option key=${g.path} value=${g.path}>${g.label || g.path}</option>
+              `)}
+            </select>
           </div>
           <div class="field">
             <label>TOOL</label>

@@ -137,6 +137,7 @@ type HookStatus struct {
 	Status                   string    // running, idle, waiting, dead
 	SessionID                string    // Claude session ID
 	Event                    string    // Hook event name
+	Source                   string    // Native SessionStart source (e.g. clear)
 	UpdatedAt                time.Time // When this status was received
 	CodexStartedGeneration   string
 	CodexCompletedGeneration string
@@ -488,6 +489,7 @@ func (w *StatusFileWatcher) scanDirEntriesInto(out map[string]*HookStatus, dir s
 			Status                   string `json:"status"`
 			SessionID                string `json:"session_id"`
 			Event                    string `json:"event"`
+			Source                   string `json:"source"`
 			Timestamp                int64  `json:"ts"`
 			DoneStatus               string `json:"done_status"`
 			DoneSummary              string `json:"done_summary"`
@@ -510,6 +512,7 @@ func (w *StatusFileWatcher) scanDirEntriesInto(out map[string]*HookStatus, dir s
 			Status:                   raw.Status,
 			SessionID:                raw.SessionID,
 			Event:                    raw.Event,
+			Source:                   raw.Source,
 			UpdatedAt:                time.Unix(raw.Timestamp, 0),
 			DoneStatus:               raw.DoneStatus,
 			DoneSummary:              raw.DoneSummary,
@@ -657,6 +660,7 @@ func (w *StatusFileWatcher) processFile(filePath string) {
 		Status                   string `json:"status"`
 		SessionID                string `json:"session_id"`
 		Event                    string `json:"event"`
+		Source                   string `json:"source"`
 		Timestamp                int64  `json:"ts"`
 		DoneStatus               string `json:"done_status"`
 		DoneSummary              string `json:"done_summary"`
@@ -686,6 +690,7 @@ func (w *StatusFileWatcher) processFile(filePath string) {
 		Status:                   status.Status,
 		SessionID:                status.SessionID,
 		Event:                    status.Event,
+		Source:                   status.Source,
 		UpdatedAt:                time.Unix(status.Timestamp, 0),
 		DoneStatus:               status.DoneStatus,
 		DoneSummary:              status.DoneSummary,

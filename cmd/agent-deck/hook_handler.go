@@ -67,6 +67,7 @@ type hookStatusFile struct {
 	Status                   string `json:"status"`
 	SessionID                string `json:"session_id,omitempty"`
 	Event                    string `json:"event"`
+	Source                   string `json:"source,omitempty"`
 	Timestamp                int64  `json:"ts"`
 	CodexStartedGeneration   string `json:"codex_started_generation,omitempty"`
 	CodexCompletedGeneration string `json:"codex_completed_generation,omitempty"`
@@ -248,9 +249,9 @@ func handleHookHandler() {
 	}
 
 	if isStopHookEvent(payload.HookEventName) {
-		writeHookStatusWithScan(instanceID, status, sessionID, payload.HookEventName, payload.Cwd, detectDoneSentinel(data))
+		writeHookStatusWithScan(instanceID, status, sessionID, payload.HookEventName, payload.Source, payload.Cwd, detectDoneSentinel(data))
 	} else {
-		writeHookStatus(instanceID, status, sessionID, payload.HookEventName, payload.Cwd)
+		writeHookStatusWithSource(instanceID, status, sessionID, payload.HookEventName, payload.Source, payload.Cwd)
 	}
 
 	// #572: Sync agent-deck title from Claude Code's --name / /rename value.
@@ -335,18 +336,22 @@ func parentIsDSP() bool {
 // The optional done argument carries a completion sentinel (issue #1186);
 // when supplied its status/summary are persisted alongside the hook status.
 func writeHookStatus(instanceID, status, sessionID, event, cwd string, done ...session.DoneSignal) {
+	writeHookStatusWithSource(instanceID, status, sessionID, event, "", cwd, done...)
+}
+
+func writeHookStatusWithSource(instanceID, status, sessionID, event, source, cwd string, done ...session.DoneSignal) {
 	scan := doneScanResult{}
 	if len(done) > 0 {
 		scan.signal = &done[0]
 	}
-	writeHookStatusWithScan(instanceID, status, sessionID, event, cwd, scan)
+	writeHookStatusWithScan(instanceID, status, sessionID, event, source, cwd, scan)
 }
 
 // writeHookStatusWithScan is writeHookStatus plus the full Stop-edge scan
 // outcome: a parsed sentinel persists as done_status/done_summary; an
 // unflushed tail persists as transcript_path so the daemon can finish the
 // scan (issue #1186 flush race).
-func writeHookStatusWithScan(instanceID, status, sessionID, event, cwd string, scan doneScanResult) {
+func writeHookStatusWithScan(instanceID, status, sessionID, event, source, cwd string, scan doneScanResult) {
 	if instanceID == "" || status == "" {
 		return
 	}
@@ -367,6 +372,7 @@ func writeHookStatusWithScan(instanceID, status, sessionID, event, cwd string, s
 		Status:    status,
 		SessionID: sessionID,
 		Event:     event,
+		Source:    strings.TrimSpace(source),
 		Timestamp: time.Now().Unix(),
 		Cwd:       strings.TrimSpace(cwd),
 	}

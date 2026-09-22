@@ -181,7 +181,7 @@ func TestWriteHookStatusWithScan_PersistsPendingTranscript(t *testing.T) {
 	instanceID := "inst-pending"
 
 	pendingPath := filepath.Join(tmpHome, ".claude", "projects", "p", "transcript.jsonl")
-	writeHookStatusWithScan(instanceID, "waiting", "sess-3", "Stop", "", doneScanResult{pendingTranscript: pendingPath})
+	writeHookStatusWithScan(instanceID, "waiting", "sess-3", "Stop", "", "", doneScanResult{pendingTranscript: pendingPath})
 
 	data, err := os.ReadFile(filepath.Join(getHooksDir(), instanceID+".json"))
 	if err != nil {
