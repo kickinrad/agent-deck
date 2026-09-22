@@ -101,6 +101,34 @@ func TestIssue1225_CommitToInbox_DistinctChildrenCoexist(t *testing.T) {
 	}
 }
 
+func TestIssue1225_CommitToInbox_RoutineTelemetryCannotEraseCompletion(t *testing.T) {
+	inboxTestHome(t)
+	parent, child := "parent-preserve-finished", "child-preserve-finished"
+	finished := TransitionNotificationEvent{
+		ChildSessionID: child, Profile: "test", Kind: transitionKindFinished,
+		DoneStatus: "ok", DoneSummary: "explicit completion", Timestamp: time.Now(),
+	}
+	if err := CommitToInbox(parent, finished); err != nil {
+		t.Fatal(err)
+	}
+	if reserved, err := ReserveInboxWakeSubmission(parent, TurnFingerprint(finished)); err != nil || !reserved {
+		t.Fatalf("reserve completion wake = (%v, %v), want (true, nil)", reserved, err)
+	}
+	telemetry := TransitionNotificationEvent{
+		ChildSessionID: child, Profile: "test", FromStatus: "running", ToStatus: "waiting", Timestamp: time.Now(),
+	}
+	if err := CommitToInbox(parent, telemetry); err != nil {
+		t.Fatal(err)
+	}
+	got := readInboxLines(t, parent)
+	if len(got) != 2 {
+		t.Fatalf("pending records = %d, want completion plus telemetry: %+v", len(got), got)
+	}
+	if got[0].Kind != transitionKindFinished || got[0].WakeSubmission != wakeSubmissionUncertain {
+		t.Fatalf("completion was overwritten or lost reservation: %+v", got[0])
+	}
+}
+
 // turn_fingerprint is stable across re-emits of the same turn (same child +
 // same output hash) but distinct across turns — the basis for exactly-once
 // effects (case 4) that survives a daemon restart re-stamping timestamps.

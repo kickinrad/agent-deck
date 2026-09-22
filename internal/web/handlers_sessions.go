@@ -68,6 +68,9 @@ func (s *Server) handleSessionsCollection(w http.ResponseWriter, r *http.Request
 			writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "projectPath is required")
 			return
 		}
+		if strings.TrimSpace(req.GroupPath) == "" {
+			req.GroupPath = session.DefaultGroupPath
+		}
 		if s.mutator == nil {
 			writeAPIError(w, http.StatusServiceUnavailable, ErrCodeNotImplemented, "mutations not available")
 			return

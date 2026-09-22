@@ -414,7 +414,7 @@ func (s *StateDB) Migrate() error {
 			id              TEXT PRIMARY KEY,
 			title           TEXT NOT NULL,
 			project_path    TEXT NOT NULL,
-			group_path      TEXT NOT NULL DEFAULT 'my-sessions',
+			group_path      TEXT NOT NULL DEFAULT 'sessions',
 			sort_order      INTEGER NOT NULL DEFAULT 0,
 			command         TEXT NOT NULL DEFAULT '',
 			wrapper         TEXT NOT NULL DEFAULT '',
@@ -466,6 +466,47 @@ func (s *StateDB) Migrate() error {
 		// SQLite returns "duplicate column name" when the column already exists.
 		if !strings.Contains(err.Error(), "duplicate column") {
 			return fmt.Errorf("statedb: add groups.max_concurrent: %w", err)
+		}
+	}
+
+	// The former built-in default was represented by either the display name
+	// ("My Sessions") or the old key ("my-sessions"). Consolidate both into
+	// `sessions` before any caller loads the registry. Existing `sessions`
+	// settings always win; memberships, including archived rows, are preserved.
+	// This runs after the legacy column repair and in the schema transaction, so
+	// reload/import/remove cannot resurrect a legacy default between read/save.
+	var legacyDefaultGroups, legacyDefaultMemberships int
+	if err := tx.QueryRow(`SELECT COUNT(1) FROM groups WHERE path IN ('my-sessions', 'My Sessions')`).Scan(&legacyDefaultGroups); err != nil {
+		return fmt.Errorf("statedb: inspect legacy default groups: %w", err)
+	}
+	if err := tx.QueryRow(`SELECT COUNT(1) FROM instances WHERE group_path IN ('my-sessions', 'My Sessions')`).Scan(&legacyDefaultMemberships); err != nil {
+		return fmt.Errorf("statedb: inspect legacy default memberships: %w", err)
+	}
+	if legacyDefaultGroups > 0 || legacyDefaultMemberships > 0 {
+		if _, err := tx.Exec(`
+			INSERT OR IGNORE INTO groups (path, name, expanded, sort_order, default_path, max_concurrent)
+			SELECT 'sessions', 'sessions', expanded, sort_order, default_path, max_concurrent
+			FROM groups
+			WHERE path IN ('my-sessions', 'My Sessions')
+			ORDER BY CASE path WHEN 'my-sessions' THEN 0 ELSE 1 END
+			LIMIT 1
+		`); err != nil {
+			return fmt.Errorf("statedb: create sessions default group: %w", err)
+		}
+		// JSON imports can omit optional groups entirely while retaining legacy
+		// instance memberships. In that shape there is no legacy row to copy,
+		// so create the built-in group only when canonical settings do not exist.
+		if _, err := tx.Exec(`
+			INSERT OR IGNORE INTO groups (path, name, expanded, sort_order, default_path, max_concurrent)
+			VALUES ('sessions', 'sessions', 1, 0, '', 0)
+		`); err != nil {
+			return fmt.Errorf("statedb: ensure sessions default group: %w", err)
+		}
+		if _, err := tx.Exec(`UPDATE instances SET group_path = 'sessions' WHERE group_path IN ('my-sessions', 'My Sessions')`); err != nil {
+			return fmt.Errorf("statedb: migrate default group memberships: %w", err)
+		}
+		if _, err := tx.Exec(`DELETE FROM groups WHERE path IN ('my-sessions', 'My Sessions')`); err != nil {
+			return fmt.Errorf("statedb: remove legacy default groups: %w", err)
 		}
 	}
 

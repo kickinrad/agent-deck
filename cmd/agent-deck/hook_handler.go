@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -67,6 +68,7 @@ type hookStatusFile struct {
 	Status                   string `json:"status"`
 	SessionID                string `json:"session_id,omitempty"`
 	Event                    string `json:"event"`
+	Source                   string `json:"source,omitempty"`
 	Timestamp                int64  `json:"ts"`
 	CodexStartedGeneration   string `json:"codex_started_generation,omitempty"`
 	CodexCompletedGeneration string `json:"codex_completed_generation,omitempty"`
@@ -93,6 +95,10 @@ type hookStatusFile struct {
 	// inherited AGENTDECK_INSTANCE_ID) must never bind. omitempty keeps legacy
 	// files byte-identical when the agent sends no cwd.
 	Cwd string `json:"cwd,omitempty"`
+	// ClaudePID is the managed Claude process that emitted this hook. Native
+	// /clear only trusts the root Claude process in this tmux pane: a same-cwd
+	// subagent inherits the instance environment but cannot replace its parent.
+	ClaudePID int `json:"claude_pid,omitempty"`
 }
 
 type hookGenerationControl struct {
@@ -248,9 +254,9 @@ func handleHookHandler() {
 	}
 
 	if isStopHookEvent(payload.HookEventName) {
-		writeHookStatusWithScan(instanceID, status, sessionID, payload.HookEventName, payload.Cwd, detectDoneSentinel(data))
+		writeHookStatusWithScan(instanceID, status, sessionID, payload.HookEventName, payload.Source, payload.Cwd, detectDoneSentinel(data))
 	} else {
-		writeHookStatus(instanceID, status, sessionID, payload.HookEventName, payload.Cwd)
+		writeHookStatusWithSource(instanceID, status, sessionID, payload.HookEventName, payload.Source, payload.Cwd)
 	}
 
 	// #572: Sync agent-deck title from Claude Code's --name / /rename value.
@@ -331,22 +337,63 @@ func parentIsDSP() bool {
 	return strings.Contains(string(cmdline), "--dangerously-skip-permissions")
 }
 
+// hookClaudeProcessPID finds the nearest Claude ancestor while the hook is
+// still running. The watcher sees the status after this short-lived hook has
+// exited, so recording the emitting agent PID here is the only durable process
+// provenance available to the later rebind decision. /proc is available on
+// Linux and WSL; other platforms fail closed for the privileged /clear path.
+func hookClaudeProcessPID() int {
+	pid := os.Getppid()
+	for depth := 0; pid > 1 && depth < 12; depth++ {
+		cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+		if err != nil {
+			return 0
+		}
+		command := strings.ToLower(strings.ReplaceAll(string(cmdline), "\x00", " "))
+		if strings.Contains(command, "claude") && !strings.Contains(command, "hook-handler") {
+			return pid
+		}
+		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			return 0
+		}
+		closing := strings.LastIndexByte(string(stat), ')')
+		if closing < 0 {
+			return 0
+		}
+		fields := strings.Fields(string(stat)[closing+1:])
+		if len(fields) < 2 {
+			return 0
+		}
+		next, err := strconv.Atoi(fields[1]) // state, then parent PID
+		if err != nil || next <= 1 || next == pid {
+			return 0
+		}
+		pid = next
+	}
+	return 0
+}
+
 // writeHookStatus writes a hook status file atomically for one instance.
 // The optional done argument carries a completion sentinel (issue #1186);
 // when supplied its status/summary are persisted alongside the hook status.
 func writeHookStatus(instanceID, status, sessionID, event, cwd string, done ...session.DoneSignal) {
+	writeHookStatusWithSource(instanceID, status, sessionID, event, "", cwd, done...)
+}
+
+func writeHookStatusWithSource(instanceID, status, sessionID, event, source, cwd string, done ...session.DoneSignal) {
 	scan := doneScanResult{}
 	if len(done) > 0 {
 		scan.signal = &done[0]
 	}
-	writeHookStatusWithScan(instanceID, status, sessionID, event, cwd, scan)
+	writeHookStatusWithScan(instanceID, status, sessionID, event, source, cwd, scan)
 }
 
 // writeHookStatusWithScan is writeHookStatus plus the full Stop-edge scan
 // outcome: a parsed sentinel persists as done_status/done_summary; an
 // unflushed tail persists as transcript_path so the daemon can finish the
 // scan (issue #1186 flush race).
-func writeHookStatusWithScan(instanceID, status, sessionID, event, cwd string, scan doneScanResult) {
+func writeHookStatusWithScan(instanceID, status, sessionID, event, source, cwd string, scan doneScanResult) {
 	if instanceID == "" || status == "" {
 		return
 	}
@@ -367,8 +414,10 @@ func writeHookStatusWithScan(instanceID, status, sessionID, event, cwd string, s
 		Status:    status,
 		SessionID: sessionID,
 		Event:     event,
+		Source:    strings.TrimSpace(source),
 		Timestamp: time.Now().Unix(),
 		Cwd:       strings.TrimSpace(cwd),
+		ClaudePID: hookClaudeProcessPID(),
 	}
 	if scan.signal != nil {
 		statusFile.DoneStatus = scan.signal.Status

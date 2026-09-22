@@ -101,6 +101,12 @@ type TransitionNotificationEvent struct {
 	// Timestamp. Format: "<child_id>@<turn-signal-hash>".
 	TurnFingerprint string `json:"turn_fingerprint,omitempty"`
 
+	// WakeSubmission records that a completion's idle wake was submitted. The
+	// submission is deliberately durable before dispatch: send --no-wait cannot
+	// prove whether tmux accepted an ambiguous request, so a daemon restart must
+	// not blindly submit the same completion again.
+	WakeSubmission string `json:"wake_submission,omitempty"`
+
 	// Attempts counts producer commit attempts against an unresolvable target
 	// before the record is moved to the dead-letter store (issue #1225). Bounds
 	// the old dropped_no_target ~1/sec runaway to a terminal state.
@@ -292,6 +298,12 @@ func isConductorSessionTitle(title string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(title)), "conductor-")
 }
 
+// isConductorInstance uses persisted conductor metadata. The title fallback
+// preserves existing records written before IsConductor was available.
+func isConductorInstance(inst *Instance) bool {
+	return inst != nil && (inst.IsConductor || isConductorSessionTitle(inst.Title))
+}
+
 // instanceAcceptsTransitionEvents is the centralized per-session predicate used
 // at NEW-emission (transition_daemon.go) to decide whether a session is
 // currently accepting transition events. All "is this session currently
@@ -426,11 +438,15 @@ func resolveParentNotificationTarget(child *Instance, byID map[string]*Instance)
 	if parent.ID == child.ID {
 		return nil
 	}
-	if isConductorSessionTitle(parent.Title) {
+	// A parent link is explicit delegation regardless of its title or group.
+	// Refresh a live pane before deciding whether an actionable report can wake
+	// it; a storage-only parent keeps its persisted status so durable reporting
+	// still works while no local tmux handle is attached.
+	if parent.tmuxSession != nil && parent.tmuxSession.Exists() {
 		_ = parent.UpdateStatus()
-		if !isLiveSessionStatus(parent.Status) {
-			return nil
-		}
+	}
+	if !isLiveSessionStatus(parent.Status) {
+		return nil
 	}
 	return parent
 }

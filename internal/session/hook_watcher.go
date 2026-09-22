@@ -137,6 +137,7 @@ type HookStatus struct {
 	Status                   string    // running, idle, waiting, dead
 	SessionID                string    // Claude session ID
 	Event                    string    // Hook event name
+	Source                   string    // Native SessionStart source (e.g. clear)
 	UpdatedAt                time.Time // When this status was received
 	CodexStartedGeneration   string
 	CodexCompletedGeneration string
@@ -158,6 +159,9 @@ type HookStatus struct {
 	// id may bind — empty (legacy files, agents that send no cwd) means "no
 	// evidence either way" and never blocks.
 	Cwd string
+	// ClaudePID identifies the emitting Claude process and is required for a
+	// native /clear rebind to prove it came from this pane's root process.
+	ClaudePID int
 }
 
 // hookGenerationForInstance resolves generation authority by instance, not by
@@ -488,11 +492,13 @@ func (w *StatusFileWatcher) scanDirEntriesInto(out map[string]*HookStatus, dir s
 			Status                   string `json:"status"`
 			SessionID                string `json:"session_id"`
 			Event                    string `json:"event"`
+			Source                   string `json:"source"`
 			Timestamp                int64  `json:"ts"`
 			DoneStatus               string `json:"done_status"`
 			DoneSummary              string `json:"done_summary"`
 			TranscriptPath           string `json:"transcript_path"`
 			Cwd                      string `json:"cwd"`
+			ClaudePID                int    `json:"claude_pid"`
 			CodexStartedGeneration   string `json:"codex_started_generation"`
 			CodexCompletedGeneration string `json:"codex_completed_generation"`
 			CodexStartedSessionID    string `json:"codex_started_session_id"`
@@ -510,11 +516,13 @@ func (w *StatusFileWatcher) scanDirEntriesInto(out map[string]*HookStatus, dir s
 			Status:                   raw.Status,
 			SessionID:                raw.SessionID,
 			Event:                    raw.Event,
+			Source:                   raw.Source,
 			UpdatedAt:                time.Unix(raw.Timestamp, 0),
 			DoneStatus:               raw.DoneStatus,
 			DoneSummary:              raw.DoneSummary,
 			TranscriptPath:           raw.TranscriptPath,
 			Cwd:                      raw.Cwd,
+			ClaudePID:                raw.ClaudePID,
 			CodexStartedGeneration:   raw.CodexStartedGeneration,
 			CodexCompletedGeneration: raw.CodexCompletedGeneration,
 			CodexStartedSessionID:    raw.CodexStartedSessionID,
@@ -657,6 +665,7 @@ func (w *StatusFileWatcher) processFile(filePath string) {
 		Status                   string `json:"status"`
 		SessionID                string `json:"session_id"`
 		Event                    string `json:"event"`
+		Source                   string `json:"source"`
 		Timestamp                int64  `json:"ts"`
 		DoneStatus               string `json:"done_status"`
 		DoneSummary              string `json:"done_summary"`
@@ -686,6 +695,7 @@ func (w *StatusFileWatcher) processFile(filePath string) {
 		Status:                   status.Status,
 		SessionID:                status.SessionID,
 		Event:                    status.Event,
+		Source:                   status.Source,
 		UpdatedAt:                time.Unix(status.Timestamp, 0),
 		DoneStatus:               status.DoneStatus,
 		DoneSummary:              status.DoneSummary,

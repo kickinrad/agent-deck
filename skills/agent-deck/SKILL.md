@@ -60,7 +60,7 @@ What agent-deck does, at the noun level (independent of which surface — CLI / 
 | **Manage sessions** | Create, start, stop, restart, fork, send, output, remove a session | CLI ✅ · TUI ✅ · Web UI 🟡 |
 | **Sub-agent / worker spawning** | `agent-deck launch` a child Claude session with parent linkage and inherited `--add-dir` | CLI ✅ · TUI ⚪ |
 | **Manage conductors** | Set up long-lived orchestrators with their own profile + channel + heartbeat | CLI ✅ · TUI 🟡 |
-| **Manage groups** | Move / delete groups; organize sessions hierarchically | CLI ✅ · TUI ✅ |
+| **Manage groups** | Organize sidebar entries; groups do not establish session hierarchy | CLI ✅ · TUI ✅ |
 | **Manage watchers** | Install / configure event-driven adapters (Gmail, GitHub, ntfy) — doorbell-not-messenger | CLI ✅ · TUI ✅ |
 | **Heartbeat orchestration** | Cron / ScheduleWakeup feeding the conductor periodic system-state nudges | CLI ✅ |
 | **Worktree workflows** | `--worktree` to create isolated git-worktree-backed sessions for parallel branch work | CLI ✅ |
@@ -100,7 +100,7 @@ The table above is what *agent-deck* does. This one is what the *CLI inside a se
 
 **Choosing the `-c` tool for a child:** default to **claude** when its Agent and Workflow tools fit the task. Reach for **codex** for a fast non-interactive second opinion, code review (`codex review`), sandboxed exec, or native in-process helpers when exposed by that runtime; use Agent Deck when work needs a separately managed visible session. Reach for **gemini** for a third opinion or large-context reads.
 
-**agent-deck powers every child also has** (independent of CLI): `agent-deck mcp attach/detach` then `session restart`; `launch` further child or peer sessions (`-no-parent` for peers); load pool skills on demand; `session send` to talk to sibling sessions. See [Sub-Agent Launch](#sub-agent-launch), [Peer (Root) Sessions vs Sub-Agents](#peer-root-sessions-vs-sub-agents), [MCP Management](#mcp-management).
+**agent-deck powers every child also has** (independent of CLI): `agent-deck mcp attach/detach` then `session restart`; `launch` independent roots or explicit children; load pool skills on demand; `session send` to talk to sibling sessions. See [Sub-Agent Launch](#sub-agent-launch), [Peer (Root) Sessions vs Sub-Agents](#peer-root-sessions-vs-sub-agents), [MCP Management](#mcp-management).
 
 **When to go inline vs Agent tool vs Workflow** (for claude children) is owned by the shared conductor template's *Delegation* section (`~/.agent-deck/conductor/conductor-claude.md`) and is not duplicated here: 1 task = inline; a few independent subtasks = Agent tool; a sweep / audit / matrix = Workflow — and always adversarially verify findings with a second agent told to refute.
 
@@ -296,36 +296,24 @@ agent-deck remove "Codex Review" && agent-deck remove "Gemini Arch"
 
 ## Peer (Root) Sessions vs Sub-Agents
 
-**The default — sub-agent linkage:** `agent-deck launch` and `agent-deck add`, when invoked from *inside* an existing agent-deck session, automatically link the new session as a child of the calling session (sets `parent_session_id`, inherits the parent's group when `-g` is omitted, and grants `--add-dir` to the parent's project path). This is usually what you want for short-lived work sessions (plan / verify / release / consult).
+Launches are independent roots by default, including launches from the shell,
+TUI, web, or another Deck session. The default group is `sessions`. Use
+`--parent <session-id>` only when the named session actually delegated the
+work; that explicit child inherits its parent's group unless `--group` is
+given. An explicit group wins.
 
-**When the default is wrong — root-level peer sessions:** if you are creating a session that should stand independently at the root — a peer conductor, a standalone project session, a session that should outlive the current one, or anything that semantically is NOT a child of the calling session — pass the `-no-parent` flag.
+Groups organize the sidebar and parent links record delegation. Neither is a
+monitoring assignment, recovery enrollment, or authority grant. To monitor a
+session, name its exact ID without changing its parent or group.
 
-| Use case | Parent linkage | Flag |
+| Use case | Parent linkage | Launch |
 |---|---|---|
-| Plan / impl / verify worker for the current task | ✅ child | (default) |
-| Consultation (codex / gemini / research) | ✅ child | (default) |
-| Another conductor (root-level peer) | ❌ child | `-no-parent` |
-| Project session unrelated to current work | ❌ child | `-no-parent` |
-| Session intended to outlive the caller | ❌ child | `-no-parent` |
+| User-started or otherwise independent work | none | `agent-deck launch <path> -c <tool>` |
+| Work explicitly delegated by a session | actual delegator | `agent-deck launch <path> -c <tool> --parent <session-id>` |
 
-```bash
-# Root-level peer conductor, no parent linkage:
-agent-deck launch ~/projects/foo -t "conductor-foo" -g "conductor" -c claude -no-parent -m "..."
-
-# Verify after spawn:
-agent-deck list --json | jq '.[] | select(.title=="conductor-foo") | .parent_session_id'
-# Must print: null
-```
-
-**Symptoms you created a sub-agent when you wanted a peer:**
-- `parent_session_id` is non-null in `list --json` output
-- The new session's baked `pane_start_command` contains `--add-dir <caller's path>` even though you gave it a different project path
-- Transition events for the new session's children flow to the caller instead of the new peer
-- Event routing and heartbeat parent-linkage puts it under the caller's tree in the TUI
-
-**Fix for an already-created sub-agent:** stop + remove the session, re-launch with `-no-parent`. There is no in-place un-parent flag.
-
-**Note on the launch-subagent.sh script:** that script is specifically designed to create sub-agents (the name says so). It does NOT support `-no-parent`. For peer sessions, skip the script and invoke `agent-deck launch -no-parent` directly.
+Use native `/clear` in Claude or `/new` in Codex to begin a fresh conversation
+inside an existing Deck session. The Deck entry remains while its stored
+conversation binding changes and prior native history remains available.
 
 ## Conductors
 
@@ -880,18 +868,10 @@ Friction points discovered during real usage. Work around them per the patterns 
 
 On a freshly-launched Claude session, `agent-deck session send --no-wait <id> "..."` may paste the message into the input buffer before Claude is fully ready, leaving it TYPED but not SUBMITTED. Classic race.
 
-**Workaround (always safe):**
-```bash
-agent-deck -p <profile> session send <id> "..." --no-wait -q
-sleep 3
-# Get the tmux session name and send Enter to submit
-TMUX=$(agent-deck -p <profile> session show --json <id> | jq -r .tmux_session)
-tmux send-keys -t "$TMUX" Enter
-```
-
-The Enter is idempotent — if already submitted, it's just a no-op newline. Use this pattern every time you `session send --no-wait` to a freshly-launched session.
-
-**Alternative:** omit `--no-wait` so the built-in 60s readiness wait kicks in before submitting.
+**Supported response:** omit `--no-wait` and allow the built-in readiness wait.
+If delivery remains uncertain, reobserve the target's output before retrying or
+ask the attached operator to submit the visible prompt. General terminal-key
+injection is outside this workflow.
 
 ### Replacing the binary while agent-deck is running (`text file busy`)
 
@@ -1021,12 +1001,12 @@ These were surfaced by mining real conductor transcripts (see [Self-Improvement]
 | All sessions die on SSH logout (tmux server in login-session cgroup) | `loginctl enable-linger` on the host + `launch_in_user_scope=true` | [#958](https://github.com/asheshgoplani/agent-deck/issues/958) |
 | Parallel `agent-deck launch` cascade → swap thrash → workers + conductor die | Sequential launches; cap parallelism; don't reach for `vm.overcommit_memory=2` (worsens it) | [#964](https://github.com/asheshgoplani/agent-deck/issues/964) |
 | Orphaned context7 MCP procs (PPID=1) accumulating; `pkill -f context7-mcp` from inside the conductor self-immolates | Guard with `$$` check: `grep -q $$ <(pgrep -f "<pat>") \|\| pkill -f "<pat>"` | [#965](https://github.com/asheshgoplani/agent-deck/issues/965) |
-| `launch-subagent.sh` puts children in parent's `conductor` group instead of project group | Always pass `-g <project-group>` explicitly | [#972](https://github.com/asheshgoplani/agent-deck/issues/972) |
+| A delegated child appears outside its delegator's group | Launch it with `--parent <actual-delegator-id>`; use `--group` only when deliberately overriding inheritance | [#972](https://github.com/asheshgoplani/agent-deck/issues/972) |
 | Bare slash commands sent via `session send` ignored on a freshly restarted child | Wrap conversationally: `"Please run /cmd …"` | [#966](https://github.com/asheshgoplani/agent-deck/issues/966) |
 | `.mcp.json` plugin version pins go stale after plugin upgrade | After `/mcp` reload, rewrite `.mcp.json` from current plugin spec | [#960](https://github.com/asheshgoplani/agent-deck/issues/960) |
 | Cron heartbeat `NEED:` lines repeat unchanged for 12-21h with no auto-retire | After 3 repeats, change tactic — escalate explicitly or spawn a different worker | [#971](https://github.com/asheshgoplani/agent-deck/issues/971) |
 | `agent-deck launch -m "<rich text>"` short-flag parser misroutes — text after `-m` becomes positional `[path]` | Use long-form flags: `--message`, `--title`, `--group`, `--parent` | (filed in batch) |
-| CLI verb inconsistency: `session update --no-parent`, `group remove`, `launch -parent` all rejected | Correct verbs: `session unset-parent`, `group delete`, `launch` does not accept `-parent` (it's automatic) | [#974](https://github.com/asheshgoplani/agent-deck/issues/974) |
+| CLI verb inconsistency: `session update --no-parent`, `group remove`, `launch -parent` all rejected | Correct verbs: `session unset-parent`, `group delete`, and `launch --parent <actual-delegator-id>` | [#974](https://github.com/asheshgoplani/agent-deck/issues/974) |
 
 See the [Self-Improvement](#self-improvement) section for how these were discovered and how to surface more from your own conductor's transcripts.
 

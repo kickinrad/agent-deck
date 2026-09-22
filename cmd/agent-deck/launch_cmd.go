@@ -48,15 +48,10 @@ func handleLaunch(profile string, args []string) {
 	noWait := fs.Bool("no-wait", false, "Don't wait for agent to be ready before sending message")
 	assertDone := fs.Bool("assert-done", false, "Append a completion-sentinel instruction to the message (default on for -c claude)")
 	noAssertDone := fs.Bool("no-assert-done", false, "Disable the completion-sentinel instruction")
-	parent := fs.String("parent", "", "Parent session (creates sub-session; group is cwd-derived by default — auto-inherits the parent's group for git worktree children or with --inherit-group)")
+	parent := fs.String("parent", "", "Parent session (creates a child in the parent's group unless --group is supplied)")
 	parentShort := fs.String("p", "", "Parent session (short)")
 	noParent := fs.Bool("no-parent", false, "Disable automatic parent linking")
-	// Keep a fanned-out child in the parent's group instead of the cwd-derived
-	// group. Without this, a child launched into a worktree (.worktrees/<branch>)
-	// derives its group from that leaf folder and lands in a per-branch group
-	// detached from the parent. Opt-in so #972 (conductor children -> project
-	// group) is preserved by default. Used by the fleet skill.
-	inheritGroup := fs.Bool("inherit-group", false, "Place the child in the parent session's group instead of the cwd-derived group (auto-applied for git worktree children; use this to force it for non-worktree paths)")
+	inheritGroup := fs.Bool("inherit-group", false, "Deprecated compatibility flag; children already inherit their parent group unless --group is supplied")
 	noTransitionNotify := fs.Bool("no-transition-notify", false, "Suppress transition event notifications to parent session")
 	// #697: conductor-friendly title lock. Prevents Claude's session name
 	// from overwriting the agent-deck title. An explicit -t/--title already
@@ -355,23 +350,10 @@ func handleLaunch(profile string, args []string) {
 		os.Exit(1)
 	}
 
-	// Resolve parent session if specified.
-	// Issue #972: when no explicit -g is passed, prefer the cwd-derived
-	// project group over the parent's group, so conductor-spawned children
-	// land in the project group (e.g. `agent-deck`) instead of the
-	// conductor's own group (`conductor`). The parent group is now a
-	// fallback for path mappings that produce no group.
-	cwdDerivedGroup := session.GroupPathForProject(path)
-	// A worktree child auto-inherits its parent's group (issue: fleets fanned
-	// into worktrees scattered into junk per-branch / `worktrees` groups, or
-	// a deliberately-named group, detached from the parent). `path` is already
-	// the final worktree path here (the -w branch above reassigns it before
-	// this point). git.IsLinkedWorktree returns false for main working trees,
-	// so #972's conductor children (separate real repos) keep cwd-derived group.
-	// The thunk defers the git probe until shouldInheritParentGroup needs it.
-	inheritParentGroup := shouldInheritParentGroup(explicitGroupProvided, *inheritGroup, func() bool {
-		return git.IsLinkedWorktree(path)
-	})
+	// Roots are independent by default. Parent links are explicit delegation,
+	// and an explicit child belongs in the actual parent's sidebar group unless
+	// the caller deliberately supplied --group.
+	_ = inheritGroup // retained as a no-op compatibility flag
 	var parentInstance *session.Instance
 	if sessionParent != "" {
 		var errMsg string
@@ -384,18 +366,8 @@ func handleLaunch(profile string, args []string) {
 			out.Error("cannot create sub-session of a sub-session (single level only)", ErrCodeInvalidOperation)
 			os.Exit(1)
 		}
-		sessionGroup = resolveGroupSelection(sessionGroup, cwdDerivedGroup, parentInstance.GroupPath, explicitGroupProvided, inheritParentGroup)
-	} else if !*noParent {
-		var unresolvedParent string
-		parentInstance, unresolvedParent = resolveAutoParentInstanceChecked(instances)
-		if parentInstance == nil && unresolvedParent != "" {
-			out.Error(fmt.Sprintf("automatic parent %q could not be resolved; use --parent with a valid session or --no-parent for an intentional top-level session", unresolvedParent), ErrCodeNotFound)
-			os.Exit(1)
-		}
-		if parentInstance != nil && !parentInstance.IsSubSession() {
-			sessionGroup = resolveGroupSelection(sessionGroup, cwdDerivedGroup, parentInstance.GroupPath, explicitGroupProvided, inheritParentGroup)
-		} else {
-			parentInstance = nil
+		if !explicitGroupProvided {
+			sessionGroup = parentInstance.GroupPath
 		}
 	}
 

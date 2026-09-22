@@ -24,16 +24,10 @@ This differs from the single sub-agent pattern in the `agent-deck` skill (one
 child + fire-&-forget / on-demand / blocking retrieval). Fleet is **many
 children + a non-blocking peek** across all of them.
 
-**Run from inside an agent-deck session.** Launching auto-parents each child to
-the launching session, which is what makes them show up nested in the TUI and
-routes their completion back to you. (If you are not in a session, the children
-still launch but won't be grouped under a parent.)
-
-**Need a *specific* parent?** Auto-parenting picks the launching session. To
-parent a child to a different session — e.g. fanning out under a named conductor,
-or launching from outside that session — pass `--parent <session-id-or-title>`.
-Spell out the long form: **never use the short `-p` to set a parent** (see the
-`-p` pitfall in Notes).
+Launches are roots unless you name the actual delegator with
+`--parent <session-id>`. Fleet is for explicit delegated children; an
+independent session is not a fleet child merely because it is launched nearby.
+Use the long form because `-p` selects a profile, not a parent.
 
 ## Before you fan out
 
@@ -60,36 +54,23 @@ Spell out the long form: **never use the short `-p` to set a parent** (see the
 ### 1. Fan out (one `launch` per child; loop it)
 
 ```bash
-agent-deck launch <path> -c claude --inherit-group -m "<task for this child>"
+agent-deck launch <path> -c claude --parent <actual-delegator-id> -m "<task for this child>"
 ```
 
-- **Auto-parents** to your current session — children appear nested under you in
-  the TUI session list, each with its own live status.
-- **Children land in your group automatically.** A child launched into a git
-  worktree auto-inherits the parent's group, so a worktree fleet stays
-  co-located with you with no extra flags. For a non-worktree path that doesn't
-  inherit, add `--inherit-group` to force it.
-- **Do NOT pass a custom `-g/--group` for fleet children.** An explicit group
-  overrides inheritance and drops the child into its own detached group
-  (e.g. a stray `fleet-issues` sitting next to — not under — your group). Leave
-  the group off and let it inherit; only set `-g` when you deliberately want a
-  child somewhere other than with the parent.
+- **Parentage is explicit.** Children appear under their actual delegator and
+  inherit that session's group unless `--group` is explicitly set.
+- **Groups organize the sidebar.** They neither select monitoring or recovery
+  nor grant control over a session.
 - **`--assert-done` is on by default for `-c claude`**: the child's message gets
   a final-step instruction to print the completion sentinel
   (`===AGENTDECK_DONE=== status=ok summary=…`) so "done" is trustworthy.
 - Run it N times (different `<path>` and `-m` per child) to fan out a fleet.
 
 Useful flags:
-- `--inherit-group` — force the parent's group for a non-worktree child (worktree
-  children already inherit automatically).
 - `-t "<title>"` — give each child a readable title (otherwise auto-named).
-- `--parent <id|title>` — explicitly parent the child to a specific session
-  instead of the auto-detected one. One step, no follow-up needed. **Long form
-  only** — see the `-p` pitfall in Notes.
+- `--parent <id>` — explicitly parent the child to the actual delegator. Use
+  the full session ID and long form.
 - `--no-assert-done` — skip the completion-sentinel instruction.
-- `--no-parent` — launch a standalone top-level session you supervise directly,
-  not nested under you (you lose completion routing). **Set `-g` explicitly** for
-  these — see "Independent (un-parented) sessions" below.
 
 ### 2. Keep working
 
@@ -181,9 +162,9 @@ the child is done (or any time you want its current output).
 
 ```bash
 # Fan out 3 children, each on a different package:
-agent-deck launch ./pkg/a -c claude --inherit-group -t "lint-a" -m "Fix all lint errors in this package."
-agent-deck launch ./pkg/b -c claude --inherit-group -t "lint-b" -m "Fix all lint errors in this package."
-agent-deck launch ./pkg/c -c claude --inherit-group -t "lint-c" -m "Fix all lint errors in this package."
+agent-deck launch ./pkg/a -c claude --parent <actual-delegator-id> -t "lint-a" -m "Fix all lint errors in this package."
+agent-deck launch ./pkg/b -c claude --parent <actual-delegator-id> -t "lint-b" -m "Fix all lint errors in this package."
+agent-deck launch ./pkg/c -c claude --parent <actual-delegator-id> -t "lint-c" -m "Fix all lint errors in this package."
 
 # ...keep working, then whenever convenient:
 agent-deck session children --json
@@ -195,39 +176,6 @@ agent-deck session send lint-a "Yes, drop the deprecated shim — don't keep a f
 
 # For each child reporting done, pull its result:
 agent-deck session output lint-a --json
-```
-
-## Independent (un-parented) sessions
-
-Sometimes the user wants standalone sessions they supervise **directly** — not
-children of the conductor. Launch those with `--no-parent`. They run flat: no
-nesting in the TUI, and no completion routing back to your inbox.
-
-**The group trap.** A *parented* worktree child auto-inherits the parent's group
-— that's why the parented-fleet rule is "never pass `-g`." With `--no-parent`
-there is no parent to inherit from, so a worktree session falls back to its
-**cwd-derived group: the worktree's branch leaf** (e.g. a stray `issue-896`
-group sitting *next to* your real group instead of with its siblings).
-
-So the rule **inverts** for independent sessions: *pass the group explicitly.*
-`$AGENTDECK_RESOLVED_GROUP` holds the launching session's group.
-
-```bash
-agent-deck launch <path> -w <branch> --no-parent -g "$AGENTDECK_RESOLVED_GROUP" -c claude -m "..."
-```
-
-Or repair an already-launched stray, no restart needed:
-
-```bash
-agent-deck group move <child-id> "$AGENTDECK_RESOLVED_GROUP"
-agent-deck group delete <stray-group>        # once it's empty
-```
-
-**Verify the group** after any `--no-parent` worktree launch (`ls --json` is
-large; filter to the one session):
-
-```bash
-agent-deck ls --json | jq -r '.[] | select(.title|test("<name>")) | "\(.title)\t\(.group)"'
 ```
 
 ## Supervision tools the parent can use
@@ -279,14 +227,9 @@ it with `AGENTDECK_NO_CHILDREN_CONTEXT=1` in its environment.
 - **Non-blocking by design:** there is intentionally no "wait until all finish"
   command — checking is a cheap, repeatable query so a parent's other chats are
   never frozen.
-- **Grouping:** worktree children inherit the parent's group automatically;
-  for non-worktree paths add `--inherit-group`. Never pass a custom `-g` for a
-  fleet child — it overrides inheritance and detaches the child into its own
-  group. If a fleet did scatter (a stray group, or per-branch groups), move them
-  back without restarting: `agent-deck group move <child-id> <parent-group>`,
-  then `agent-deck group delete <stray-group>` once it's empty. (This "never pass
-  `-g`" rule is for *parented* children; for `--no-parent` standalone sessions it
-  inverts — you *must* set `-g`. See "Independent (un-parented) sessions".)
+- **Grouping:** a child inherits the actual parent's group. An explicit
+  `--group` wins. Groups organize the sidebar only; use exact session IDs for
+  monitoring and recovery selection.
 - **The `-p` pitfall — use `--parent`, never `-p`, for a parent.** `-p` is the
   *global* `--profile` shorthand, parsed before the subcommand. On older builds it
   swallows your intended parent id as a profile name and routes the child into a

@@ -9831,6 +9831,16 @@ func (h *Home) handleNewDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		parentSessionID := h.newDialog.GetParentSessionID()
 		parentProjectPath := h.newDialog.GetParentProjectPath()
+		// A parent is an explicit delegation edge. Keep its children beside it
+		// unless the dialog was opened on an explicitly selected group.
+		if parentSessionID != "" {
+			h.instancesMu.RLock()
+			parent := h.instanceByID[parentSessionID]
+			h.instancesMu.RUnlock()
+			if parent != nil && parent.GroupPath != "" {
+				groupPath = parent.GroupPath
+			}
+		}
 
 		// Only non-worktree sessions may need interactive "create directory" confirmation.
 		if !worktreeEnabled {
@@ -11512,34 +11522,20 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// shell selected, unchanged.
 		h.newDialog.SetDefaultTool(resolveInitialTool(session.GetDefaultTool(), rememberedTool(h.stateDB())))
 
-		// Auto-select parent group from current cursor position
+		// Independent roots start in the configured default group regardless of
+		// cursor or scoped view. Group and parent remain separate explicit dialog
+		// choices, so browsing a persona cannot silently create its child.
 		groupPath := session.DefaultGroupPath
-		groupName := session.DefaultGroupName
-		if h.groupScope != "" {
-			// Scoped mode: default to scope root
-			groupPath = h.groupScope
-			if group, exists := h.groupTree.Groups[h.groupScope]; exists {
-				groupName = group.Name
-			}
-		}
-		if h.cursor < len(h.flatItems) {
-			item := h.flatItems[h.cursor]
-			switch item.Type {
-			case session.ItemTypeGroup:
-				groupPath = item.Group.Path
-				groupName = item.Group.Name
-			case session.ItemTypeSession:
-				// Use the session's group
-				groupPath = item.Path
-				if group, exists := h.groupTree.Groups[groupPath]; exists {
-					groupName = group.Name
-				}
-			}
+		groupName := groupPath
+		if group, exists := h.groupTree.Groups[groupPath]; exists {
+			groupName = group.Name
 		}
 		defaultPath := h.getDefaultPathForGroup(groupPath)
 		conductors := h.activeConductorSessions()
-		suggestedParentID := h.suggestConductorParent()
-		h.newDialog.ShowInGroup(groupPath, groupName, defaultPath, conductors, suggestedParentID)
+		// A new session is an independent root unless the user explicitly picks
+		// a parent in the dialog. Cursor position may choose its group, never its
+		// orchestration parent.
+		h.newDialog.ShowInGroup(groupPath, groupName, defaultPath, conductors, "")
 		return h, nil
 
 	case "N":

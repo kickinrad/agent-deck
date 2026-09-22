@@ -501,6 +501,7 @@ func (d *TransitionDaemon) syncProfile(profile string) time.Duration {
 		// Cover fast transitions that completed before we observed a running snapshot.
 		d.emitHookTransitionCandidates(profile, byID, nil, statuses, hookCandidates)
 		d.emitDoneSignals(profile, byID, hookStatuses)
+		d.reconcilePendingInboxWakes(profile, byID, statuses)
 		d.lastStatus[profile] = copyStatusMap(statuses)
 		d.initialized[profile] = true
 		return choosePollInterval(statuses)
@@ -546,9 +547,40 @@ func (d *TransitionDaemon) syncProfile(profile string) time.Duration {
 	}
 	d.emitHookTransitionCandidates(profile, byID, prev, statuses, hookCandidates)
 	d.emitDoneSignals(profile, byID, hookStatuses)
+	d.reconcilePendingInboxWakes(profile, byID, statuses)
 
 	d.lastStatus[profile] = copyStatusMap(statuses)
 	return choosePollInterval(statuses)
+}
+
+// reconcilePendingInboxWakes is the native pull-side recovery path for
+// explicit completion sentinels. A completion committed while its Codex parent
+// was busy remains in the inbox; when a later daemon pass observes that parent
+// idle, this tries exactly one durably reserved wake. Routine transitions never
+// enter this path. The reservation survives daemon restart and treats a
+// no-wait dispatch as uncertain, so recovery never blindly duplicates input.
+func (d *TransitionDaemon) reconcilePendingInboxWakes(profile string, byID map[string]*Instance, statuses map[string]string) {
+	if d == nil || d.notifier == nil {
+		return
+	}
+	for parentID, parent := range byID {
+		parent.Status = Status(normalizeStatusString(statuses[parentID]))
+		if !parentIsNudgeableIdle(parent) {
+			continue
+		}
+		events, err := ReadInboxEvents(parentID)
+		if err != nil {
+			commsLog.Warn("wake_nudge_reconcile_read_failed",
+				slog.String("parent", parentID), slog.String("error", err.Error()))
+			continue
+		}
+		for _, event := range events {
+			if event.Kind != transitionKindFinished || event.Profile != profile {
+				continue
+			}
+			d.notifier.fireWakeNudge(parent, event)
+		}
+	}
 }
 
 // turnBaseline returns the per-instance completed-turn map for profile,
@@ -1027,11 +1059,13 @@ func readHookStatusFile(instanceID string) *HookStatus {
 		Status                   string `json:"status"`
 		SessionID                string `json:"session_id"`
 		Event                    string `json:"event"`
+		Source                   string `json:"source"`
 		Timestamp                int64  `json:"ts"`
 		DoneStatus               string `json:"done_status"`
 		DoneSummary              string `json:"done_summary"`
 		TranscriptPath           string `json:"transcript_path"`
 		Cwd                      string `json:"cwd"`
+		ClaudePID                int    `json:"claude_pid"`
 		CodexStartedGeneration   string `json:"codex_started_generation"`
 		CodexCompletedGeneration string `json:"codex_completed_generation"`
 		CodexStartedSessionID    string `json:"codex_started_session_id"`
@@ -1056,11 +1090,13 @@ func readHookStatusFile(instanceID string) *HookStatus {
 		Status:                   raw.Status,
 		SessionID:                raw.SessionID,
 		Event:                    raw.Event,
+		Source:                   raw.Source,
 		UpdatedAt:                updatedAt,
 		DoneStatus:               raw.DoneStatus,
 		DoneSummary:              raw.DoneSummary,
 		TranscriptPath:           raw.TranscriptPath,
 		Cwd:                      raw.Cwd,
+		ClaudePID:                raw.ClaudePID,
 		CodexStartedGeneration:   raw.CodexStartedGeneration,
 		CodexCompletedGeneration: raw.CodexCompletedGeneration,
 		CodexStartedSessionID:    raw.CodexStartedSessionID,

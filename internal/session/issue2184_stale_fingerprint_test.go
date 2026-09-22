@@ -4,8 +4,8 @@ package session
 // transcript signal (LastOutputHash, the transcript size) had NOT advanced since
 // the child's last notified turn. TurnFingerprint keyed the turn on that stale
 // signal, so the new completion carried the fingerprint of an already-consumed
-// turn and the consumer dropped it as a duplicate; since #2240 the wake-nudge is
-// withheld for such a record too, so the parent never learned about it at all.
+// turn and the consumer dropped it as a duplicate. The durable record must
+// still reach the parent even though routine transitions never wake a model.
 //
 // The fix: the notifier compares the event's LastOutputHash with the persisted
 // last-notified hash for the child. When a NEW transition arrives with the SAME
@@ -49,7 +49,7 @@ func newStaleHashNotifierFixture(t *testing.T) (*TransitionNotifier, string, fun
 }
 
 // The reported bug: a second completed turn whose transcript signal did not
-// advance must still reach the parent (delivered once, nudged once).
+// advance must still reach the parent exactly once without a wake.
 func TestIssue2184_StaleFingerprintNewCompletionDelivered(t *testing.T) {
 	n, parentID, build, sent := newStaleHashNotifierFixture(t)
 	t0 := time.Now().Add(-4 * time.Hour)
@@ -65,8 +65,8 @@ func TestIssue2184_StaleFingerprintNewCompletionDelivered(t *testing.T) {
 	if err != nil || len(firstDrained) != 1 {
 		t.Fatalf("first drain: delivered=%d err=%v", len(firstDrained), err)
 	}
-	if *sent != 1 {
-		t.Fatalf("first turn must nudge once, got %d", *sent)
+	if *sent != 0 {
+		t.Fatalf("routine transition woke parent: got %d", *sent)
 	}
 
 	// A later turn: the daemon observed running→waiting again, well outside the
@@ -88,8 +88,8 @@ func TestIssue2184_StaleFingerprintNewCompletionDelivered(t *testing.T) {
 	if got[0].TurnFingerprint == "" || got[0].TurnFingerprint == firstDrained[0].TurnFingerprint {
 		t.Fatalf("a new completion with a stale hash must not reuse the consumed turn_fingerprint %q", firstDrained[0].TurnFingerprint)
 	}
-	if *sent != 2 {
-		t.Fatalf("a deliverable stale-hash completion must nudge the parent: sent=%d, want 2", *sent)
+	if *sent != 0 {
+		t.Fatalf("routine stale-hash transition woke parent: sent=%d", *sent)
 	}
 }
 
@@ -115,8 +115,8 @@ func TestIssue2184_IdenticalRepeatStillDeduped(t *testing.T) {
 		t.Fatalf("stale-hash drain: delivered=%d err=%v", len(staleDrained), err)
 	}
 	staleRecord := staleDrained[0]
-	if *sent != 2 {
-		t.Fatalf("precondition: two nudges, got %d", *sent)
+	if *sent != 0 {
+		t.Fatalf("precondition: routine transitions must not wake, got %d", *sent)
 	}
 
 	// Re-fire inside the 90s short window (a second daemon path observing the
@@ -137,8 +137,8 @@ func TestIssue2184_IdenticalRepeatStillDeduped(t *testing.T) {
 	if got, err := DrainInboxForParent(parentID); err != nil || len(got) != 0 {
 		t.Fatalf("replayed stale record must be deduped: delivered=%+v err=%v", got, err)
 	}
-	if *sent != 2 {
-		t.Fatalf("duplicates fired a wake-nudge: sent=%d, want 2", *sent)
+	if *sent != 0 {
+		t.Fatalf("duplicates fired a wake-nudge: sent=%d", *sent)
 	}
 }
 
@@ -210,7 +210,7 @@ func attachTranscript(t *testing.T, f *restartFixture, body string) string {
 
 // Daemon-level reproduction: the child completes a second turn but its
 // transcript signal is unchanged. The second turn must be committed as a
-// stale-flagged record, delivered by the drain, and nudged.
+// stale-flagged record and delivered by the drain without a wake.
 func TestIssue2184_DaemonDeliversSecondTurnWithUnchangedTranscriptSignal(t *testing.T) {
 	f := newRestartFixture(t, "running")
 	attachTranscript(t, f, "{\"type\":\"user\"}\n")
@@ -245,8 +245,8 @@ func TestIssue2184_DaemonDeliversSecondTurnWithUnchangedTranscriptSignal(t *test
 	if err != nil || len(delivered) != 1 {
 		t.Fatalf("second drain must deliver the new completion: delivered=%d err=%v", len(delivered), err)
 	}
-	if n := f.nudges(); n != 2 {
-		t.Fatalf("expected a nudge per delivered turn (2), got %d", n)
+	if n := f.nudges(); n != 0 {
+		t.Fatalf("routine transitions woke parent: got %d", n)
 	}
 }
 
@@ -276,8 +276,8 @@ func TestIssue2184_RestartSeedingUnchangedWithStableTranscriptSignal(t *testing.
 	if got := readInboxLines(t, f.parent.ID); len(got) != 0 {
 		t.Fatalf("restart re-committed an already-notified turn: %+v", got)
 	}
-	if n := f.nudges(); n != 1 {
-		t.Fatalf("restart fired a phantom wake-nudge: total nudges %d, want 1", n)
+	if n := f.nudges(); n != 0 {
+		t.Fatalf("restart fired a phantom wake-nudge: total nudges %d", n)
 	}
 
 	// A turn that completed while the daemon was down (transcript grew) is

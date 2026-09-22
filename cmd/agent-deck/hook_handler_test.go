@@ -266,6 +266,23 @@ func TestWriteHookStatus_StopDoesNotClearStickySession(t *testing.T) {
 	}
 }
 
+func TestWriteHookStatus_PreservesNativeSessionStartSource(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	writeHookStatusWithSource("inst-clear", "waiting", "sess-clear", "SessionStart", "clear", "/tmp/project")
+	data, err := os.ReadFile(filepath.Join(getHooksDir(), "inst-clear.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hook hookStatusFile
+	if err := json.Unmarshal(data, &hook); err != nil {
+		t.Fatal(err)
+	}
+	if hook.Source != "clear" {
+		t.Fatalf("hook source=%q, want clear", hook.Source)
+	}
+}
+
 func TestIsTerminalHookEvent(t *testing.T) {
 	tests := []struct {
 		event  string

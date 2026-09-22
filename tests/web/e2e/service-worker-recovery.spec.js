@@ -105,7 +105,7 @@ test.describe('service worker shell upgrades', () => {
         }
       })
       expect(upgraded.bundle).toBe(currentBundle)
-      expect(upgraded.cacheNames).toContain('agentdeck-shell-v10')
+      expect(upgraded.cacheNames).toContain(productionWorker.match(/agentdeck-shell-v\d+/)[0])
       expect(upgraded.cacheNames).not.toContain('agentdeck-shell-v9')
     } finally {
       await new Promise((resolve) => server.close(resolve))

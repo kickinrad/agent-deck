@@ -395,6 +395,7 @@ agent-deck fleet recover                       # plan only (dry run)
 agent-deck fleet recover --yes                 # actually recover
 agent-deck fleet recover --yes --spacing 8s --limit 10
 agent-deck fleet recover --yes --group agent-deck --json
+agent-deck fleet recover --yes --session-id <full-id> --session-id <full-id>
 ```
 
 Restarts the down sessions **one at a time**, waiting `--spacing` (default 5s,
@@ -404,6 +405,10 @@ forks a shared rotating OAuth refresh token and 401s the whole fleet.
 
 **Dry run by default.** Without `--yes` the command prints the plan (order,
 waits, estimated runtime) and exits without restarting anything.
+
+Use repeatable `--session-id <full-id>` selectors for protected recovery
+identities. A group is only sidebar organization, so group membership never
+enrolls a session in recovery.
 
 Each boot is verified before the next begins: the pane must be back AND the
 session must reach a state only a booted agent produces. A restart that returns
@@ -437,6 +442,7 @@ Options:
 --max-dead-boots <n>     Halt after N consecutive boots whose pane died immediately (default 3, 0 disables)
 --auth-halt-after <n>    Halt after N auth-failed boots (default 2, 0 disables)
 --group <path>           Only consider sessions in this group and its descendants
+--session-id <full-id>   Only consider this exact session; repeat for each intended identity
 --include-idle           Also treat status=idle sessions as down
 --confirm-probes <n>     Probes that must agree a session is gone (default 2)
 --confirm-delay <dur>    Delay between confirming probes (default 750ms)

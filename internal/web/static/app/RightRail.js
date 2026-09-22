@@ -3,7 +3,7 @@
 // Cards: Overview, Usage, MCPs, Skills, Children, Events. User toggles which
 // are visible in the rail-add picker at the bottom.
 //
-// The Children card renders the conductor child-session topology. The
+// The Children card renders explicitly delegated child-session topology. The
 // tree is built client-side from the same menuModelSignal that drives
 // the session list, so it stays in sync with SSE menu updates for free.
 // The Go endpoint at GET /api/sessions/{id}/children exposes the same
@@ -27,7 +27,7 @@ const AVAIL_PANELS = [
   { id: 'usage',    label: 'Usage & activity' },
   { id: 'mcps',     label: 'MCPs' },
   { id: 'skills',   label: 'Skills' },
-  { id: 'children', label: 'Children (conductor)' },
+  { id: 'children', label: 'Children' },
   { id: 'events',   label: 'Events (watcher)' },
 ]
 
@@ -185,8 +185,8 @@ export function RightRail() {
             <${NoData} msg="Skill attachments not exposed via web API. Use TUI (s key)."/>
           </${Card}>
         `}
-        ${panels.children && session.kind === 'conductor' && html`
-          <${Card} title="CHILDREN" badge="conductor" testid="rail-card-children">
+        ${panels.children && (session.kind === 'conductor' || sessions.some(s => s.raw?.parentSessionId === session.id)) && html`
+          <${Card} title="CHILDREN" testid="rail-card-children">
             <${ChildrenTree} rootId=${session.id} sessions=${sessions}/>
           </${Card}>
         `}
