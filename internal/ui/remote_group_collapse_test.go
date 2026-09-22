@@ -13,7 +13,7 @@ import (
 
 // collapseTestSessions is a remote with a nested tree:
 //
-//	remotes/dev/my-sessions   -> loose
+//	remotes/dev/sessions   -> loose
 //	remotes/dev/work          -> api-1
 //	remotes/dev/work/api      -> api-2
 func collapseTestSessions() []session.RemoteSessionInfo {
@@ -78,7 +78,7 @@ func TestRemoteCollapse_SubGroupHidesDescendantsOnly(t *testing.T) {
 	if headers["remotes/dev/work/api"] {
 		t.Error("descendant header of a collapsed group must be hidden")
 	}
-	if !headers["remotes/dev/my-sessions"] {
+	if !headers["remotes/dev/sessions"] {
 		t.Error("sibling group must be unaffected by the collapse")
 	}
 

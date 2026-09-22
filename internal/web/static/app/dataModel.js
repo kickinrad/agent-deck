@@ -10,13 +10,12 @@
 import { computed } from '@preact/signals'
 import { sessionsSignal, sessionCostsSignal } from './state.js'
 
-// Kind is supplied for conductors by the API. Keep the group/title convention
-// as a compatibility fallback for sessions persisted before that field existed.
+// Keep the legacy presentation convention; delegation capability comes from
+// actual parent links and does not promote ordinary sessions to a special kind.
 // `tool` is `claude|codex|gemini|shell|webhook|...`; treat anything not in
 // the agent set as a watcher. Conductor is detected by group convention.
 function deriveKind(s) {
   if (!s || !s.tool) return 'agent'
-  if (s.isConductor) return 'conductor'
   if (s.groupPath === 'conductor' || /conductor/i.test(s.title || '')) return 'conductor'
   if (['webhook', 'ntfy', 'slack-watcher'].includes(s.tool)) return 'watcher'
   return 'agent'
