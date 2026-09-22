@@ -3,7 +3,7 @@ Profile: goldens
 ID:      golden-sess-1
 Status:  ✕ error
 Path:    /repo/app
-Group:   my-sessions
+Group:   sessions
 Tool:    claude
 Account: ""
 Model:   tool default

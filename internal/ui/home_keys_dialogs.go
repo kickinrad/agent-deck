@@ -249,6 +249,16 @@ func (h *Home) handleNewDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		parentSessionID := h.newDialog.GetParentSessionID()
 		parentProjectPath := h.newDialog.GetParentProjectPath()
+		// A parent is an explicit delegation edge. Keep its children beside it
+		// unless the dialog was opened on an explicitly selected group.
+		if parentSessionID != "" {
+			h.instancesMu.RLock()
+			parent := h.instanceByID[parentSessionID]
+			h.instancesMu.RUnlock()
+			if parent != nil && parent.GroupPath != "" {
+				groupPath = parent.GroupPath
+			}
+		}
 
 		// The hooks line (ASK-211) answers the Claude hooks question the old
 		// box asked: ticked installs, unticked skips, the same recorded

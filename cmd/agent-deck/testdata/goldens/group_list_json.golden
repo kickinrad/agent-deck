@@ -1,8 +1,8 @@
 {
   "groups": [
     {
-      "name": "My Sessions",
-      "path": "my-sessions",
+      "name": "sessions",
+      "path": "sessions",
       "session_count": 2,
       "status": {
         "running": 0,

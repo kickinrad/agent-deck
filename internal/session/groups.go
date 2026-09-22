@@ -21,11 +21,27 @@ var ErrGroupAlreadyExists = errors.New("group already exists at target path")
 // ErrGroupNotFound is returned by RenameGroup when oldPath does not resolve to an existing group.
 var ErrGroupNotFound = errors.New("group not found")
 
-// DefaultGroupName is the display name for the default group where ungrouped sessions go
-const DefaultGroupName = "My Sessions"
+// DefaultGroupName is the display name for the default group where independent
+// sessions go. The path deliberately matches it: this is the stable home for
+// roots created by every surface.
+const DefaultGroupName = "sessions"
 
-// DefaultGroupPath is the normalized path for the default group (used for lookups and protection)
-const DefaultGroupPath = "my-sessions"
+// DefaultGroupPath is the normalized path for the protected default group.
+const DefaultGroupPath = "sessions"
+
+// LegacyDefaultGroupPaths are exact historic default-group keys. They are
+// migrated during StateDB startup; keep this list narrow so a user-created
+// group with a similar name is never folded into the default by accident.
+var LegacyDefaultGroupPaths = []string{"my-sessions", "My Sessions"}
+
+func isLegacyDefaultGroupPath(path string) bool {
+	for _, legacy := range LegacyDefaultGroupPaths {
+		if path == legacy {
+			return true
+		}
+	}
+	return false
+}
 
 // ItemType represents the type of item in the flattened list
 type ItemType int

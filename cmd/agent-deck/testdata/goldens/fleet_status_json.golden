@@ -5,7 +5,7 @@
   "probes": 2,
   "sessions": [
     {
-      "group": "my-sessions",
+      "group": "sessions",
       "id": "golden-sess-2",
       "status": "running",
       "title": "codex running"

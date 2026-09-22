@@ -2,8 +2,8 @@ Profile: goldens
 
 TITLE                GROUP           PATH                                     ID           ACCOUNT
 --------------------------------------------------------------------------------------------
-claude idle          my-sessions     /repo/app                                golden-sess- ""
-codex running        my-sessions     /repo/app                                golden-sess- ""
+claude idle          sessions        /repo/app                                golden-sess- ""
+codex running        sessions        /repo/app                                golden-sess- ""
 gemini waiting       backend         /repo/backend                            golden-sess- ""
 shell error          backend         /repo/backend                            golden-sess- ""
 claude stopped       backend/api     /repo/backend/api                        golden-sess- ""

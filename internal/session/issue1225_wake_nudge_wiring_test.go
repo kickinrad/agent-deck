@@ -18,9 +18,9 @@ import (
 
 // newWakeNudgeFixture seeds a child→parent pair in a fresh profile and returns a
 // notifier plus a finished event whose commit resolves to parentID. The parent
-// is titled non-"conductor-" so resolveParentNotificationTarget keeps it live
-// without a tmux UpdateStatus (the conductor-scoping policy is unit-tested
-// separately in TestIssue1225_ParentIsNudgeableIdle).
+// has an ordinary title: an explicit parent link, not conductor residency,
+// governs delivery (the gate is unit-tested separately in
+// TestIssue1225_ParentIsNudgeableIdle).
 func newWakeNudgeFixture(t *testing.T) (*TransitionNotifier, string, TransitionNotificationEvent) {
 	t.Helper()
 	inboxTestHome(t)
@@ -155,11 +155,11 @@ func TestIssue1225_NudgeSendErrorIsHarmless(t *testing.T) {
 }
 
 // The PRODUCTION default wiring (not a test spy) is fully populated and routes
-// its idle probe through the conductor-scoped gate end-to-end: a conductor-
-// prefixed title is nudgeable only when idle, a busy conductor and a
-// non-conductor leaf are not. This guards against a future refactor silently
-// swapping defaultWakeNudgeWiring's isIdle for an unscoped probe.
-func TestIssue1225_DefaultWiringUsesConductorIdleGate(t *testing.T) {
+// its idle probe through the parent gate end-to-end: any explicit parent that
+// runs an agent is nudgeable only when idle; a busy parent and a shell are
+// not. This guards against a future refactor silently swapping
+// defaultWakeNudgeWiring's isIdle for an unscoped probe.
+func TestIssue1225_DefaultWiringUsesParentIdleGate(t *testing.T) {
 	withNoopStatusProbe(t)
 	w := defaultWakeNudgeWiring()
 	if w == nil || w.nudger == nil || w.now == nil || w.isIdle == nil || w.send == nil {
@@ -171,31 +171,260 @@ func TestIssue1225_DefaultWiringUsesConductorIdleGate(t *testing.T) {
 	if w.isIdle(&Instance{ID: "c", Title: "conductor-x", Status: StatusRunning}, "parent") {
 		t.Fatal("default wiring must NOT nudge a busy conductor (send-keys would only queue)")
 	}
-	if w.isIdle(&Instance{ID: "l", Title: "worker", Status: StatusIdle}, "parent") {
-		t.Fatal("default wiring must NOT nudge a non-conductor leaf (no inbox drain → noise)")
+	if !w.isIdle(&Instance{ID: "l", Title: "worker", Tool: "claude", Status: StatusIdle}, "parent") {
+		t.Fatal("default wiring must nudge an idle ordinary parent")
+	}
+	if w.isIdle(&Instance{ID: "s", Title: "worker", Tool: "shell", Status: StatusIdle}, "parent") {
+		t.Fatal("default wiring must NOT type a wake line into a shell")
 	}
 }
 
-// The production idle-probe is conductor-scoped (only conductors drain an inbox)
-// and only green when the pane is idle/waiting (not mid-turn).
+// The production idle-probe accepts any explicit parent that runs an agent,
+// and is only green when the pane is idle/waiting (not mid-turn).
 func TestIssue1225_ParentIsNudgeableIdle(t *testing.T) {
 	withNoopStatusProbe(t)
 	cases := []struct {
 		title  string
+		tool   string
 		status Status
 		want   bool
 	}{
-		{"conductor-x", StatusIdle, true},
-		{"conductor-x", StatusWaiting, true},
-		{"conductor-x", StatusRunning, false}, // busy: send-keys would only queue
-		{"worker", StatusIdle, false},         // non-conductor leaf: no inbox drain → noise
-		{"conductor-x", StatusError, false},
+		{"conductor-x", "claude", StatusIdle, true},
+		{"conductor-x", "claude", StatusWaiting, true},
+		{"conductor-x", "claude", StatusRunning, false}, // busy: send-keys would only queue
+		{"worker", "claude", StatusIdle, true},          // explicit parent, whatever its title
+		{"worker", "codex", StatusWaiting, true},
+		{"worker", "shell", StatusIdle, false}, // a shell would execute the line
+		{"conductor-x", "claude", StatusError, false},
 	}
 	for _, c := range cases {
-		p := &Instance{ID: "p", Title: c.title, Status: c.status}
+		p := &Instance{ID: "p", Title: c.title, Tool: c.tool, Status: c.status}
 		if got := parentIsNudgeableIdle(p, "parent"); got != c.want {
 			t.Errorf("parentIsNudgeableIdle(title=%q,status=%q)=%v, want %v", c.title, c.status, got, c.want)
 		}
+	}
+}
+
+// wakeSpy is a wiring whose idle probe and sends are counted. debounce and
+// clock drive the real WakeNudger; a zero clock means the wall clock.
+type wakeSpy struct {
+	idle     bool
+	probes   int
+	sent     int
+	debounce time.Duration
+	clock    time.Time
+}
+
+func (s *wakeSpy) wiring() *wakeNudgeWiring {
+	return &wakeNudgeWiring{
+		nudger: NewWakeNudger(s.debounce),
+		now: func() time.Time {
+			if s.clock.IsZero() {
+				return time.Now()
+			}
+			return s.clock
+		},
+		isIdle: func(*Instance, string) bool { s.probes++; return s.idle },
+		send:   func(*Instance, string, string) error { s.sent++; return nil },
+	}
+}
+
+// reconcileIdle runs the daemon's idle reconciliation for parentID through n.
+func reconcileIdle(n *TransitionNotifier, profile, parentID string) {
+	reconcileIdleTitled(n, profile, parentID, "orchestrator")
+}
+
+func reconcileIdleTitled(n *TransitionNotifier, profile, parentID, title string) {
+	d := NewTransitionDaemon()
+	d.notifier = n
+	parent := &Instance{ID: parentID, Title: title, Tool: "claude", Status: StatusIdle}
+	child := &Instance{ID: "wake-child-1", ParentSessionID: parentID, Status: StatusWaiting}
+	d.reconcilePendingInboxWakes(profile, map[string]*Instance{parentID: parent, child.ID: child},
+		map[string]string{parentID: string(StatusIdle), child.ID: string(StatusWaiting)})
+}
+
+// unmarkedRecords counts pending records that hold no wake submission.
+func unmarkedRecords(t *testing.T, parentID string) int {
+	t.Helper()
+	n := 0
+	for _, ev := range readInboxLines(t, parentID) {
+		if ev.WakeSubmission == "" {
+			n++
+		}
+	}
+	return n
+}
+
+// A nudge the debounce rejects reserves nothing: the second of two urgent
+// turns 100ms apart stays retryable and the next pass wakes once for it.
+func TestDurableSessions_DebouncedWakeLeavesRecordRetryable(t *testing.T) {
+	n, parentID, event := newWakeNudgeFixture(t)
+	spy := &wakeSpy{idle: true, debounce: 500 * time.Millisecond, clock: time.Unix(5000, 0)}
+	n.wake = spy.wiring()
+	first, second := event, event
+	first.DoneSummary, second.DoneSummary = "first result", "second result"
+	n.NotifyFinished(first)
+	spy.clock = spy.clock.Add(100 * time.Millisecond)
+	n.NotifyFinished(second)
+	if spy.sent != 1 || unmarkedRecords(t, parentID) != 1 {
+		t.Fatalf("debounced turn: sent=%d unmarked=%d, want 1 and 1", spy.sent, unmarkedRecords(t, parentID))
+	}
+
+	spy.clock = spy.clock.Add(10 * time.Second)
+	reconcileIdle(n, event.Profile, parentID)
+	reconcileIdle(n, event.Profile, parentID)
+	if spy.sent != 2 || unmarkedRecords(t, parentID) != 0 {
+		t.Fatalf("retry of the debounced turn: sent=%d unmarked=%d, want 2 and 0", spy.sent, unmarkedRecords(t, parentID))
+	}
+}
+
+// A digest nudge just before reconciliation in the same pass debounces the
+// retry; the record stays unmarked and the next pass wakes once for it.
+func TestDurableSessions_DigestNudgeDoesNotSwallowRetry(t *testing.T) {
+	n, parentID, event := newWakeNudgeFixture(t)
+	spy := &wakeSpy{debounce: 500 * time.Millisecond, clock: time.Unix(6000, 0)}
+	n.wake = spy.wiring()
+	n.NotifyFinished(event) // busy: committed, not woken
+	spy.idle = true
+	parent := &Instance{ID: parentID, Title: "orchestrator", Tool: "claude", Status: StatusIdle}
+	if !n.fireDigestNudge(parent, event.Profile, "digest") {
+		t.Fatal("precondition: the digest nudge must send")
+	}
+	reconcileIdle(n, event.Profile, parentID)
+	if spy.sent != 1 || unmarkedRecords(t, parentID) != 1 {
+		t.Fatalf("same-pass retry: sent=%d unmarked=%d, want 1 and 1", spy.sent, unmarkedRecords(t, parentID))
+	}
+	spy.clock = spy.clock.Add(10 * time.Second)
+	reconcileIdle(n, event.Profile, parentID)
+	if spy.sent != 2 || unmarkedRecords(t, parentID) != 0 {
+		t.Fatalf("next-pass retry: sent=%d unmarked=%d, want 2 and 0", spy.sent, unmarkedRecords(t, parentID))
+	}
+}
+
+// A conductor's pending urgent record is left to upstream's heartbeat and
+// outbox path: the retry never probes or wakes a conductor.
+func TestDurableSessions_RetryLeavesConductorsToUpstream(t *testing.T) {
+	n, parentID, event := newWakeNudgeFixture(t)
+	spy := &wakeSpy{}
+	n.wake = spy.wiring()
+	n.NotifyFinished(event)
+	spy.idle, spy.probes = true, 0
+	reconcileIdleTitled(n, event.Profile, parentID, "conductor-ops")
+	if spy.sent != 0 || spy.probes != 0 || unmarkedRecords(t, parentID) != 1 {
+		t.Fatalf("conductor retried: sent=%d probes=%d unmarked=%d", spy.sent, spy.probes, unmarkedRecords(t, parentID))
+	}
+}
+
+// Past the per-child bound, an urgent turn folded into a woken overflow
+// digest reopens it for one wake; an info fold keeps the submission.
+func TestDurableSessions_UrgentFoldReopensDigestWake(t *testing.T) {
+	inboxTestHome(t)
+	parentID, childID := "fold-parent", "fold-child"
+	fillPendingTurns(t, parentID, childID, maxPendingTurnsPerChild)
+	fold := func(hash, tier string) TransitionNotificationEvent {
+		stored, outcome, err := commitToInbox(parentID, TransitionNotificationEvent{
+			ChildSessionID: childID, FromStatus: "running", ToStatus: "waiting",
+			LastOutputHash: hash, Tier: tier, Timestamp: time.Now(),
+		})
+		if err != nil || outcome != inboxCommitDigested {
+			t.Fatalf("fold %s: outcome=%v err=%v", hash, outcome, err)
+		}
+		return stored
+	}
+	fold("urgent-1", TurnTierUrgent)
+	if ok, err := reserveInboxWake(parentID, func(ev TransitionNotificationEvent) bool { return ev.OverflowTurns > 0 }); err != nil || !ok {
+		t.Fatalf("reserve digest: %v %v", ok, err)
+	}
+	if got := fold("info-1", TurnTierInfo); got.WakeSubmission != wakeSubmissionUncertain {
+		t.Fatalf("an info fold dropped the digest's submission: %+v", got)
+	}
+	if got := fold("urgent-2", TurnTierUrgent); got.WakeSubmission != "" {
+		t.Fatalf("an urgent fold kept the digest's submission, so it can never wake: %+v", got)
+	}
+}
+
+// A completion committed while its parent was busy is retried once the daemon
+// sees the parent idle, exactly once: the reservation is durable, so neither a
+// later pass nor a restarted daemon (empty debounce map) sends it again.
+func TestDurableSessions_BusyParentCompletionWakesOnceWhenIdle(t *testing.T) {
+	n, parentID, event := newWakeNudgeFixture(t)
+	spy := &wakeSpy{}
+	n.wake = spy.wiring()
+	if res := n.NotifyFinished(event); res.DeliveryResult != transitionDeliveryCommitted {
+		t.Fatalf("busy completion = %q, want committed", res.DeliveryResult)
+	}
+	if spy.sent != 0 {
+		t.Fatalf("busy parent woken %d times, want 0", spy.sent)
+	}
+
+	spy.idle = true
+	reconcileIdle(n, event.Profile, parentID)
+	if spy.sent != 1 {
+		t.Fatalf("idle reconciliation sent %d wakes, want 1", spy.sent)
+	}
+	if got := readInboxLines(t, parentID); len(got) != 1 || got[0].WakeSubmission != wakeSubmissionUncertain {
+		t.Fatalf("wake reservation not durable: %+v", got)
+	}
+
+	reconcileIdle(n, event.Profile, parentID)
+	restarted := NewTransitionNotifier()
+	restarted.wake = spy.wiring()
+	reconcileIdle(restarted, event.Profile, parentID)
+	if spy.sent != 1 {
+		t.Fatalf("reconciliation resubmitted the completion: sent=%d, want 1", spy.sent)
+	}
+	// The wake never consumes: the record still drains on the parent's turn.
+	if got, err := DrainInboxForParent(parentID); err != nil || len(got) != 1 {
+		t.Fatalf("drain after wake: delivered=%d err=%v", len(got), err)
+	}
+}
+
+// One finished child turn nudges an idle parent at most once: the commit-time
+// wake reserves the record, so the same daemon pass's reconciliation, a
+// re-emit of the turn by a restarted notifier, and the next pass all stay
+// quiet. A reserved record never reaches the bounded status probe.
+func TestDurableSessions_FinishedTurnNudgesParentAtMostOnce(t *testing.T) {
+	n, parentID, event := newWakeNudgeFixture(t)
+	spy := &wakeSpy{idle: true}
+	n.wake = spy.wiring()
+	n.NotifyFinished(event)
+	if spy.sent != 1 {
+		t.Fatalf("idle parent woken %d times on commit, want 1", spy.sent)
+	}
+
+	probes := spy.probes
+	reconcileIdle(n, event.Profile, parentID)
+	if spy.probes != probes {
+		t.Fatalf("a reserved record reached the status probe (%d -> %d)", probes, spy.probes)
+	}
+	restarted := NewTransitionNotifier()
+	restarted.wake = spy.wiring()
+	restarted.NotifyFinished(event)
+	reconcileIdle(restarted, event.Profile, parentID)
+	if spy.sent != 1 {
+		t.Fatalf("one finished turn woke the parent %d times, want 1", spy.sent)
+	}
+}
+
+// An info record never buys a wake of its own, not even by reconciliation:
+// it rides the parent's next turn or the info digest (issue #2469).
+func TestDurableSessions_ReconcileLeavesInfoForTheDigest(t *testing.T) {
+	n, parentID, event := newWakeNudgeFixture(t)
+	spy := &wakeSpy{}
+	n.wake = spy.wiring()
+	event.FromStatus, event.ToStatus = string(StatusRunning), string(StatusWaiting)
+	event.DoneStatus, event.DoneSummary = "", ""
+	event.Tier, event.Text = TurnTierInfo, "routine progress"
+	if res := n.NotifyTransition(event); res.DeliveryResult != transitionDeliveryCommitted {
+		t.Fatalf("info turn = %q, want committed", res.DeliveryResult)
+	}
+	spy.idle = true
+	reconcileIdle(n, event.Profile, parentID)
+	if spy.sent != 0 || spy.probes != 0 {
+		t.Fatalf("info record woke the parent: sent=%d probes=%d", spy.sent, spy.probes)
+	}
+	if got := readInboxLines(t, parentID); len(got) != 1 || got[0].Tier != TurnTierInfo {
+		t.Fatalf("info record not retained: %+v", got)
 	}
 }
 
