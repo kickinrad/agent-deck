@@ -243,6 +243,15 @@ func handleFleetRecover(profile string, args []string) {
 		"Halt after this many consecutive sessions restart and then die immediately (pane gone; 0 disables)")
 	authHaltAfter := fs.Int("auth-halt-after", fleet.DefaultAuthHaltAfter, "Halt after this many sessions boot into an auth failure (0 disables the auth breaker)")
 	groupByCredential := fs.Bool("group-by-credential", false, groupByCredentialFlagHelp())
+	var sessionIDs []string
+	fs.Func("session-id", "Only consider this exact session ID (repeatable)", func(id string) error {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return fmt.Errorf("--session-id requires a full session ID")
+		}
+		sessionIDs = append(sessionIDs, id)
+		return nil
+	})
 	det := registerFleetDetectorFlags(fs)
 
 	fs.Usage = func() {
@@ -287,6 +296,13 @@ func handleFleetRecover(profile string, args []string) {
 	if err != nil {
 		out.Error(err.Error(), ErrCodeNotFound)
 		os.Exit(1)
+	}
+	if len(sessionIDs) > 0 {
+		instances, err = filterFleetRecoverySessions(instances, sessionIDs)
+		if err != nil {
+			out.Error(err.Error(), ErrCodeNotFound)
+			os.Exit(1)
+		}
 	}
 
 	as := det.detector().Assess(instances)
@@ -349,6 +365,32 @@ func handleFleetRecover(profile string, args []string) {
 	if summary.Halted {
 		os.Exit(1)
 	}
+}
+
+// filterFleetRecoverySessions restricts recovery to exact durable IDs. Titles
+// and prefixes are deliberately unsupported: recovery is a process mutation,
+// so an ambiguous selector must never widen its target set.
+func filterFleetRecoverySessions(instances []*session.Instance, ids []string) ([]*session.Instance, error) {
+	byID := make(map[string]*session.Instance, len(instances))
+	for _, inst := range instances {
+		if inst != nil {
+			byID[inst.ID] = inst
+		}
+	}
+	seen := make(map[string]bool, len(ids))
+	selected := make([]*session.Instance, 0, len(ids))
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		inst := byID[id]
+		if inst == nil {
+			return nil, fmt.Errorf("session ID %q was not found", id)
+		}
+		selected = append(selected, inst)
+	}
+	return selected, nil
 }
 
 // fleetRecoverConfig is the parsed flag set for a sweep. It exists so the

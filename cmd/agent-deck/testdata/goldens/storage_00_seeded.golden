@@ -232,7 +232,7 @@
       "default_path": "",
       "expanded": 1,
       "max_concurrent": 0,
-      "name": "My Sessions",
+      "name": "sessions",
       "path": "my-sessions",
       "sort_order": 0
     }
