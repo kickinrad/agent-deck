@@ -1,6 +1,7 @@
 package web
 
 import (
+	"strings"
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
@@ -52,6 +53,17 @@ func refreshSnapshotHookStatuses(snapshot *MenuSnapshot, loader func() map[strin
 func applyHookStatusToMenuSession(sess *MenuSession, hs *session.HookStatus, now time.Time) {
 	if sess == nil {
 		return
+	}
+	if hs != nil && session.IsCodexCompatible(sess.Tool) {
+		inst := &session.Instance{Tool: sess.Tool, Command: sess.Command, Account: sess.codexAccount,
+			ProjectPath: sess.ProjectPath, MultiRepoEnabled: sess.MultiRepoEnabled, MultiRepoTempDir: sess.MultiRepoTempDir}
+		candidate := strings.TrimSpace(hs.SessionID)
+		if candidate == "" {
+			candidate = session.ReadHookSessionAnchor(sess.ID)
+		}
+		if !inst.ValidCodexConversationCandidate(candidate) {
+			return
+		}
 	}
 	out := sessionstatus.Derive(sessionstatus.Input{
 		Tool:              sess.Tool,

@@ -494,7 +494,7 @@ func GetConductorLastActivity(name, profile string) (time.Time, error) {
 		}
 		seen[inst.ID] = struct{}{}
 
-		if hs := readHookStatusFile(inst.ID); hs != nil && hs.UpdatedAt.After(latest) {
+		if hs := readHookStatusFile(inst.ID); hs != nil && inst.validCodexHook(hs) && hs.UpdatedAt.After(latest) {
 			latest = hs.UpdatedAt
 		}
 	}

@@ -48,6 +48,8 @@ func TestHandleCodexNotify_WritesStatus(t *testing.T) {
 	t.Setenv("AGENTDECK_INSTANCE_ID", "inst-1")
 	t.Setenv("CODEX_SESSION_ID", "")
 
+	seedCodexNotifySession(t, "inst-1", "abc-123")
+
 	origArgs := os.Args
 	defer func() { os.Args = origArgs }()
 	os.Args = []string{"agent-deck", "codex-notify"}
@@ -87,6 +89,8 @@ func TestHandleCodexNotify_ArgPayload(t *testing.T) {
 	t.Setenv("AGENTDECK_INSTANCE_ID", "inst-arg")
 	t.Setenv("CODEX_SESSION_ID", "")
 
+	seedCodexNotifySession(t, "inst-arg", "thr-1")
+
 	origArgs := os.Args
 	defer func() { os.Args = origArgs }()
 	os.Args = []string{"agent-deck", "codex-notify", `{"event":"turn/completed","thread_id":"thr-1"}`}
@@ -116,6 +120,8 @@ func TestHandleCodexNotify_JSONRPCMethodPayload(t *testing.T) {
 	t.Setenv("AGENTDECK_INSTANCE_ID", "inst-method")
 	t.Setenv("CODEX_SESSION_ID", "")
 
+	seedCodexNotifySession(t, "inst-method", "thr-42")
+
 	origArgs := os.Args
 	defer func() { os.Args = origArgs }()
 	os.Args = []string{"agent-deck", "codex-notify", `{"method":"turn/completed","params":{"thread_id":"thr-42"}}`}
@@ -144,6 +150,8 @@ func TestHandleCodexNotify_EmptyTailEventKeepsJSONEmptyAndPersistsAnchor(t *test
 	t.Setenv("HOME", tmpHome)
 	t.Setenv("AGENTDECK_INSTANCE_ID", "inst-sticky")
 	t.Setenv("CODEX_SESSION_ID", "")
+
+	seedCodexNotifySession(t, "inst-sticky", "thr-sticky")
 
 	origArgs := os.Args
 	defer func() { os.Args = origArgs }()
@@ -178,6 +186,8 @@ func TestHandleCodexNotify_EmptyTailEventKeepsJSONEmptyAndPersistsAnchor(t *test
 
 func TestWriteCodexHookStatus_NewerStartSupersedesCompletedGeneration(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	seedCodexNotifySession(t, "inst-generation", "thread-1")
+
 	writeCodexHookStatus("inst-generation", "running", "thread-1", "turn.started", "turn-1")
 	writeCodexHookStatus("inst-generation", "waiting", "thread-1", "turn.completed", "turn-1")
 	path := filepath.Join(getHooksDir(), "inst-generation.json")
@@ -210,6 +220,8 @@ func TestWriteCodexHookStatus_CompletionMustMatchTurnIdentity(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("AGENTDECK_HOOKS_DIR", filepath.Join(t.TempDir(), "hooks"))
 
+	seedCodexNotifySession(t, "turn-match", "thread-1")
+
 	writeCodexHookStatus("turn-match", "running", "thread-1", "turn.started", "turn-2")
 	writeCodexHookStatus("turn-match", "waiting", "thread-1", "turn.completed", "turn-1")
 	data, err := os.ReadFile(filepath.Join(getHooksDir(), "turn-match.json"))
@@ -240,6 +252,8 @@ func TestWriteCodexHookStatus_CompletionMustMatchTurnIdentity(t *testing.T) {
 func TestWriteCodexHookStatus_IdentityLessCompletionFailsClosed(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("AGENTDECK_HOOKS_DIR", filepath.Join(t.TempDir(), "hooks"))
+	seedCodexNotifySession(t, "no-turn", "thread-1")
+
 	writeCodexHookStatus("no-turn", "running", "thread-1", "turn.started", "turn-1")
 	writeCodexHookStatus("no-turn", "waiting", "thread-1", "agent-turn-complete", "")
 	data, err := os.ReadFile(filepath.Join(getHooksDir(), "no-turn.json"))
@@ -258,6 +272,8 @@ func TestWriteCodexHookStatus_IdentityLessCompletionFailsClosed(t *testing.T) {
 func TestWriteCodexHookStatus_LegacyCompletionConvergesWithoutStart(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("AGENTDECK_HOOKS_DIR", filepath.Join(t.TempDir(), "hooks"))
+	seedCodexNotifySession(t, "legacy-complete", "thread-1")
+
 	writeCodexHookStatus("legacy-complete", "waiting", "thread-1", "agent-turn-complete", "turn-1")
 	data, err := os.ReadFile(filepath.Join(getHooksDir(), "legacy-complete.json"))
 	if err != nil {
@@ -278,6 +294,8 @@ func TestWriteCodexHookStatus_LegacyCompletionConvergesWithoutStart(t *testing.T
 func TestWriteCodexHookStatus_IdentityLessStartClearsPriorCompletion(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("AGENTDECK_HOOKS_DIR", filepath.Join(t.TempDir(), "hooks"))
+	seedCodexNotifySession(t, "stale-pair", "thread-1")
+
 	writeCodexHookStatus("stale-pair", "waiting", "thread-1", "agent-turn-complete", "turn-1")
 	writeCodexHookStatus("stale-pair", "running", "", "turn.started", "")
 	data, err := os.ReadFile(filepath.Join(getHooksDir(), "stale-pair.json"))
@@ -302,6 +320,7 @@ func TestWriteCodexHookStatus_ConcurrentFleetPersistence(t *testing.T) {
 			for n := 0; n < size; n++ {
 				id := fmt.Sprintf("instance-%03d", n)
 				turn := fmt.Sprintf("turn-%03d", n)
+				seedCodexNotifySession(t, id, id)
 				writeCodexHookStatus(id, "running", id, "turn.started", turn)
 			}
 			var wg sync.WaitGroup

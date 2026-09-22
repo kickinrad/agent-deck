@@ -57,6 +57,9 @@ type MenuGroup struct {
 
 // MenuSession contains metadata for a session item.
 type MenuSession struct {
+	// Retained only for native hook validation; account selection is not a
+	// presentation field and must survive in-memory snapshot copies.
+	codexAccount string
 	ID           string `json:"id"`
 	Title        string `json:"title"`
 	Tool         string `json:"tool"`
@@ -325,6 +328,7 @@ func toMenuSession(inst *session.Instance) *MenuSession {
 	modelInfo := inst.LaunchModelInfo()
 
 	return &MenuSession{
+		codexAccount:       inst.Account,
 		ID:                 inst.ID,
 		Title:              inst.Title,
 		Tool:               inst.GetToolThreadSafe(),

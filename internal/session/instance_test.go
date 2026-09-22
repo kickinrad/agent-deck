@@ -4227,6 +4227,7 @@ func TestInstance_UpdateHookStatus_UsesAnchorWhenHookSessionIDMissing_Codex(t *t
 
 	inst := NewInstanceWithTool("hook-anchor-codex", "/tmp/test", "codex")
 	WriteHookSessionAnchor(inst.ID, "anchor-codex-1")
+	seedValidCodexCandidate(t, inst, "anchor-codex-1")
 
 	hookStatus := &HookStatus{
 		Status:    "waiting",
