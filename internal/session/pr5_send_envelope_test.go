@@ -179,8 +179,8 @@ func TestPR5_NudgeGateAcceptsNonConductorReplyTarget(t *testing.T) {
 	if !parentIsNudgeableIdle(worker, "reply") {
 		t.Fatal("an idle non-conductor reply target must be nudgeable")
 	}
-	if parentIsNudgeableIdle(worker, "parent") {
-		t.Fatal("a non-conductor parent target stays un-nudgeable")
+	if !parentIsNudgeableIdle(worker, "parent") {
+		t.Fatal("an idle explicit parent that runs an agent is nudgeable")
 	}
 	busy := &Instance{ID: "w", Title: "api-worker", Tool: "claude", Status: StatusRunning}
 	if parentIsNudgeableIdle(busy, "reply") {
@@ -434,7 +434,8 @@ func TestPR5_ParentBackpressureReplyNotRedeliveredAfterDrains(t *testing.T) {
 // Fix round 3 (verify r2 finding 2): an idle Claude parent that is NOT a
 // conductor asked its own child with a tagged send. The child's answer is a
 // reply to it, so it is woken (as a reply target) while the record stays
-// one "parent" copy. Other parents keep the conductor-only gate.
+// one "parent" copy. Any other parent that runs an agent is woken as a
+// parent for an urgent turn; a shell parent never is.
 func TestPR5_ParentThatAskedIsWokenForTheReply(t *testing.T) {
 	for _, tc := range []struct {
 		name, title, tool string
@@ -443,7 +444,7 @@ func TestPR5_ParentThatAskedIsWokenForTheReply(t *testing.T) {
 		wantKind          string
 	}{
 		{"non-conductor claude parent asked", "api-lead", "claude", true, true, "reply"},
-		{"non-conductor claude parent, human turn", "api-lead", "claude", false, false, "parent"},
+		{"non-conductor claude parent, human turn", "api-lead", "claude", false, true, "parent"},
 		{"non-conductor shell parent asked", "api-lead", "shell", true, false, "parent"},
 		{"conductor codex parent asked", "conductor-ops", "codex", true, true, "parent"},
 	} {

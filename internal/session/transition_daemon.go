@@ -650,6 +650,7 @@ func (d *TransitionDaemon) syncProfile(profile string) time.Duration {
 		// Cover fast transitions that completed before we observed a running snapshot.
 		d.emitHookTransitionCandidates(profile, byID, nil, statuses, hookCandidates)
 		d.emitDoneSignals(profile, byID, hookStatuses)
+		d.reconcilePendingInboxWakes(profile, byID, statuses)
 		d.lastStatus[profile] = copyStatusMap(statuses)
 		d.initialized[profile] = true
 		return choosePollInterval(statuses)
@@ -685,6 +686,7 @@ func (d *TransitionDaemon) syncProfile(profile string) time.Duration {
 	d.emitHookTransitionCandidates(profile, byID, prev, statuses, hookCandidates)
 	d.emitDoneSignals(profile, byID, hookStatuses)
 	d.wakeForInfoDigests(profile, byID, statuses)
+	d.reconcilePendingInboxWakes(profile, byID, statuses)
 
 	d.lastStatus[profile] = copyStatusMap(statuses)
 	return choosePollInterval(statuses)
@@ -796,6 +798,62 @@ func (d *TransitionDaemon) journalWriter(profile string) *health.AsyncWriter {
 	}
 	d.journalWriters[profile] = writer
 	return writer
+}
+
+// reconcilePendingInboxWakes retries the wake for a pending record that wakes
+// an explicit non-conductor parent ([inbox] wake_on) once a later pass
+// observes the parent idle. Such a record committed while its parent was busy
+// otherwise waits for the parent's next turn: a Codex parent has no Stop-hook
+// drain, and a Claude parent can go idle between its Stop drain and the
+// commit. Conductors keep upstream's heartbeat and outbox path. One reserved
+// wake per parent per pass; the reservation covers every pending record it
+// marks, survives a daemon restart, and is never resubmitted.
+func (d *TransitionDaemon) reconcilePendingInboxWakes(profile string, byID map[string]*Instance, statuses map[string]string) {
+	if d == nil || d.notifier == nil {
+		return
+	}
+	parents := map[string]bool{}
+	for _, inst := range byID {
+		if inst != nil && inst.ParentSessionID != "" {
+			parents[inst.ParentSessionID] = true
+		}
+	}
+	for parentID := range parents {
+		parent := byID[parentID]
+		if parent == nil || isConductorSessionTitle(parent.Title) {
+			continue
+		}
+		// Screen on the status this pass already observed. The wake itself
+		// re-checks idleness with a fresh bounded probe, so only parents with a
+		// pending record that still needs a wake ever pay for one.
+		switch Status(normalizeStatusString(statuses[parentID])) {
+		case StatusIdle, StatusWaiting:
+		default:
+			continue
+		}
+		if !InboxHasPending(parentID) {
+			continue
+		}
+		events, err := ReadInboxEvents(parentID)
+		if err != nil {
+			commsLog.Warn("wake_nudge_reconcile_read_failed",
+				slog.String("parent", parentID), slog.String("error", err.Error()))
+			continue
+		}
+		cfg := ResolveInboxConfig(parent.Title)
+		wakes := func(ev TransitionNotificationEvent) bool {
+			return ev.Profile == profile && cfg.WakesFor(ev.Tier)
+		}
+		for _, event := range events {
+			// A record that already holds a submission must not reach the wake
+			// gate: its bounded status probe runs before the reservation.
+			if event.WakeSubmission != "" || !wakes(event) || turnAlreadyConsumed(parentID, event.TurnFingerprint) {
+				continue
+			}
+			d.notifier.fireReservedWakeNudge(parent, event, wakes)
+			break
+		}
+	}
 }
 
 // turnBaseline returns the per-instance completed-turn map for profile,
@@ -1296,11 +1354,13 @@ func readHookStatusFile(instanceID string) *HookStatus {
 		Status                   string `json:"status"`
 		SessionID                string `json:"session_id"`
 		Event                    string `json:"event"`
+		Source                   string `json:"source"`
 		Timestamp                int64  `json:"ts"`
 		DoneStatus               string `json:"done_status"`
 		DoneSummary              string `json:"done_summary"`
 		TranscriptPath           string `json:"transcript_path"`
 		Cwd                      string `json:"cwd"`
+		ClaudePID                int    `json:"claude_pid"`
 		CodexStartedGeneration   string `json:"codex_started_generation"`
 		CodexCompletedGeneration string `json:"codex_completed_generation"`
 		CodexStartedSessionID    string `json:"codex_started_session_id"`
@@ -1327,11 +1387,13 @@ func readHookStatusFile(instanceID string) *HookStatus {
 		Status:                   raw.Status,
 		SessionID:                raw.SessionID,
 		Event:                    raw.Event,
+		Source:                   raw.Source,
 		UpdatedAt:                updatedAt,
 		DoneStatus:               raw.DoneStatus,
 		DoneSummary:              raw.DoneSummary,
 		TranscriptPath:           raw.TranscriptPath,
 		Cwd:                      raw.Cwd,
+		ClaudePID:                raw.ClaudePID,
 		CodexStartedGeneration:   raw.CodexStartedGeneration,
 		CodexCompletedGeneration: raw.CodexCompletedGeneration,
 		CodexStartedSessionID:    raw.CodexStartedSessionID,

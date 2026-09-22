@@ -20,18 +20,10 @@ Friction points discovered during real usage. Work around them per the patterns 
 
 On a freshly-launched Claude session, `agent-deck session send --no-wait <id> "..."` may paste the message into the input buffer before Claude is fully ready, leaving it TYPED but not SUBMITTED. Classic race.
 
-**Workaround (always safe):**
-```bash
-agent-deck -p <profile> session send <id> "..." --no-wait -q
-sleep 3
-# Get the tmux session name and send Enter to submit
-TMUX=$(agent-deck -p <profile> session show --json <id> | jq -r .tmux_session)
-tmux send-keys -t "$TMUX" Enter
-```
-
-The Enter is idempotent — if already submitted, it's just a no-op newline. Use this pattern every time you `session send --no-wait` to a freshly-launched session.
-
-**Alternative:** omit `--no-wait` so the built-in 60s readiness wait kicks in before submitting.
+**Supported response:** omit `--no-wait` and allow the built-in readiness wait.
+If delivery remains uncertain, reobserve the target's output before retrying or
+ask the attached operator to submit the visible prompt. General terminal-key
+injection is outside this workflow.
 
 ### Replacing the binary while agent-deck is running (`text file busy`)
 
@@ -161,12 +153,12 @@ These were surfaced by mining real conductor transcripts (see [Self-Improvement]
 | All sessions die on SSH logout (tmux server in login-session cgroup) | `loginctl enable-linger` on the host + `launch_in_user_scope=true` | [#958](https://github.com/asheshgoplani/agent-deck/issues/958) |
 | Parallel `agent-deck launch` cascade → swap thrash → workers + conductor die | Sequential launches; cap parallelism; don't reach for `vm.overcommit_memory=2` (worsens it) | [#964](https://github.com/asheshgoplani/agent-deck/issues/964) |
 | Orphaned context7 MCP procs (PPID=1) accumulating; `pkill -f context7-mcp` from inside the conductor self-immolates | Guard with `$$` check: `grep -q $$ <(pgrep -f "<pat>") \|\| pkill -f "<pat>"` | [#965](https://github.com/asheshgoplani/agent-deck/issues/965) |
-| `launch-subagent.sh` puts children in parent's `conductor` group instead of project group | Always pass `-g <project-group>` explicitly | [#972](https://github.com/asheshgoplani/agent-deck/issues/972) |
+| A delegated child appears outside its delegator's group | Launch it with `--parent <actual-delegator-id>`; use `--group` only when deliberately overriding inheritance | [#972](https://github.com/asheshgoplani/agent-deck/issues/972) |
 | Bare slash commands sent via `session send` ignored on a freshly restarted child | Wrap conversationally: `"Please run /cmd …"` | [#966](https://github.com/asheshgoplani/agent-deck/issues/966) |
 | `.mcp.json` plugin version pins go stale after plugin upgrade | After `/mcp` reload, rewrite `.mcp.json` from current plugin spec | [#960](https://github.com/asheshgoplani/agent-deck/issues/960) |
 | Cron heartbeat `NEED:` lines repeat unchanged for 12-21h with no auto-retire | After 3 repeats, change tactic — escalate explicitly or spawn a different worker | [#971](https://github.com/asheshgoplani/agent-deck/issues/971) |
 | `agent-deck launch -m "<rich text>"` short-flag parser misroutes — text after `-m` becomes positional `[path]` | Use long-form flags: `--message`, `--title`, `--group`, `--parent` | (filed in batch) |
-| CLI verb inconsistency (resolved): `session update --no-parent` and `group remove` used to be rejected | Both work since #974: `session update <id> --no-parent` is an alias for `session unset-parent <id>`, and `group remove` is an alias for `group delete`. `launch` links the calling session as parent automatically; `--parent <session>` (`-p`) is accepted as an explicit override and `--no-parent` opts out | [#974](https://github.com/asheshgoplani/agent-deck/issues/974) |
+| CLI verb inconsistency (resolved): `session update --no-parent` and `group remove` used to be rejected | Both work since #974: `session update <id> --no-parent` is an alias for `session unset-parent <id>`, and `group remove` is an alias for `group delete`. `launch` links only an explicit `--parent <actual-delegator-id>` (`-p`) | [#974](https://github.com/asheshgoplani/agent-deck/issues/974) |
 
 See the [Self-Improvement](autonomy.md#self-improvement) section for how these were discovered and how to surface more from your own conductor's transcripts.
 

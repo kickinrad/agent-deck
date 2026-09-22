@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os/exec"
 	"strings"
@@ -48,8 +50,7 @@ type wakeNudgeWiring struct {
 }
 
 // defaultWakeNudgeWiring is the production wiring: a debounced nudger, the wall
-// clock, the conductor-scoped idle probe, and a best-effort non-blocking pane
-// send.
+// clock, the parent idle probe, and a best-effort non-blocking pane send.
 func defaultWakeNudgeWiring() *wakeNudgeWiring {
 	return &wakeNudgeWiring{
 		nudger: NewWakeNudger(defaultWakeNudgeDebounce),
@@ -61,8 +62,8 @@ func defaultWakeNudgeWiring() *wakeNudgeWiring {
 
 // nudge runs one debounced, idle-gated wake send of message to parent through
 // the wiring's injected clock, idle probe and sender. targetKind is the
-// record's TargetKind ("parent" or "reply"); the idle gate admits a
-// non-conductor target only for a reply.
+// record's TargetKind ("parent" or "reply"); the idle gate admits a reply
+// target only when it is Claude-compatible.
 func (w *wakeNudgeWiring) nudge(parent *Instance, targetKind, profile, message string) (bool, error) {
 	now := time.Now()
 	if w.now != nil {
@@ -80,7 +81,7 @@ func (w *wakeNudgeWiring) nudge(parent *Instance, targetKind, profile, message s
 
 // fireWakeNudge invokes the Tier-2 wake-nudge for a parent that just had a
 // completion durably committed. It is best-effort and MUST NOT affect the commit
-// result: a nil wiring, a non-conductor/busy parent, or a send error are all
+// result: a nil wiring, a busy parent, or a send error are all
 // swallowed (the durable record still drains on the next turn/heartbeat). A
 // panic in the injected probe/send is recovered so a wake bug can never take
 // down the producer.
@@ -101,6 +102,9 @@ func (n *TransitionNotifier) fireWakeNudge(parent *Instance, event TransitionNot
 	// into the turn this line starts.
 	line := NudgeHeadline(event)
 	sent, err := w.nudge(parent, event.TargetKind, event.Profile, line)
+	if errors.Is(err, errWakeNotReserved) {
+		return
+	}
 	if err != nil {
 		// Best-effort: a failed wake is harmless. Log once at debug-ish level so
 		// the operator can see WHY a pane wasn't woken without it being an error.
@@ -115,11 +119,44 @@ func (n *TransitionNotifier) fireWakeNudge(parent *Instance, event TransitionNot
 	}
 }
 
+// errWakeNotReserved is a reserved wake's send step finding nothing left to
+// wake for: every record it covers was consumed or already submitted.
+var errWakeNotReserved = errors.New("wake not reserved")
+
+// fireReservedWakeNudge is fireWakeNudge for a record in parent's own inbox.
+// Once the idle gate and the debounce pass, every pending record that wakes
+// the parent (wakes reports which) is durably marked submitted before the
+// send: one wake drains the whole queue, and a no-wait send has no
+// acknowledgement that is safe to treat as delivery, so neither the daemon's
+// idle reconciliation nor a restarted daemon wakes the parent for those
+// records again. A busy or debounced nudge marks nothing, so the records stay
+// retryable.
+func (n *TransitionNotifier) fireReservedWakeNudge(parent *Instance, event TransitionNotificationEvent, wakes func(TransitionNotificationEvent) bool) {
+	w := n.wake
+	if w == nil || parent == nil {
+		return
+	}
+	reserving := *w
+	reserving.send = func(target *Instance, profile, message string) error {
+		reserved, err := reserveInboxWake(target.ID, wakes)
+		if err != nil {
+			return fmt.Errorf("reserve wake: %w", err)
+		}
+		if !reserved {
+			return errWakeNotReserved
+		}
+		if w.send == nil {
+			return nil
+		}
+		return w.send(target, profile, message)
+	}
+	(&TransitionNotifier{wake: &reserving}).fireWakeNudge(parent, event)
+}
+
 // parentIsNudgeableIdle reports whether parent is safe to wake with a send-keys
-// nudge: it must be a conductor (only conductors drain an inbox on Stop, so a
-// nudge to a non-conductor leaf would be pure noise) AND currently idle/waiting,
-// NOT mid-turn. A "reply" target (comms redesign PR5) is the session whose
-// tagged send the child just answered (a sibling sender, or the child's own
+// nudge: it must be a wake target for the record (see isWakeTarget) AND
+// currently idle/waiting, NOT mid-turn. A "reply" target (comms redesign PR5)
+// is the session whose tagged send the child just answered (a sibling sender, or the child's own
 // parent when it asked; see parentWakeEvent): it asked, so it is woken
 // whatever its title, but only when it is Claude-compatible (its prompt-time
 // drain injects the reply). A send-keys into a RUNNING pane only queues the
@@ -151,12 +188,15 @@ func parentIsNudgeableIdle(parent *Instance, targetKind string) bool {
 // isWakeTarget reports whether target may be woken at all for a record of
 // targetKind. A reply wake is typed into the pane and carries the child's
 // text: only a Claude-compatible pane drains it at prompt time, and a shell
-// would execute it. Any other record wakes only a conductor.
+// would execute it. Any other record wakes a conductor or any other parent
+// that runs an agent: an explicit parent link is delegation, so conductor
+// residency does not limit who receives an actionable child turn, but a plain
+// shell would execute the typed line.
 func isWakeTarget(target *Instance, targetKind string) bool {
 	if targetKind == InboxTargetKindReply {
 		return IsClaudeCompatible(target.Tool)
 	}
-	return isConductorSessionTitle(target.Title)
+	return isConductorSessionTitle(target.Title) || target.Tool != "shell"
 }
 
 // sendWakeNudge fires one best-effort wake into the parent conductor's pane and

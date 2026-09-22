@@ -2,6 +2,7 @@ package session
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -199,6 +200,7 @@ func commitToInbox(parentSessionID string, event TransitionNotificationEvent) (s
 		return event, inboxCommitAdded, err
 	}
 	outcome = inboxCommitAdded
+	urgentTurn := event.IsUrgent()
 	switch {
 	case digest != nil && event.OverflowTurns == 0 && digestHoldsTurn(*digest, event.TurnFingerprint):
 		// A replay of a turn already folded into the digest: it is counted
@@ -216,14 +218,94 @@ func commitToInbox(parentSessionID string, event TransitionNotificationEvent) (s
 
 	// Drop only a retry of this exact turn before appending the fresh copy.
 	// rewriteInboxLocked is atomic and invalidates the
-	// fingerprint cache for the path.
+	// fingerprint cache for the path. A wake already submitted for the turn
+	// carries over to the fresh copy, so the turn never wakes its parent twice;
+	// an urgent turn folded into the overflow digest is new and may wake once.
+	var submitted string
 	if _, err := rewriteInboxLocked(path, func(ev TransitionNotificationEvent) bool {
-		return sameInboxTurn(ev, event)
+		same := sameInboxTurn(ev, event)
+		if same && ev.WakeSubmission != "" {
+			submitted = ev.WakeSubmission
+		}
+		return same
 	}); err != nil {
 		return event, outcome, err
 	}
+	if outcome == inboxCommitDigested && urgentTurn {
+		event.WakeSubmission = ""
+	} else if event.WakeSubmission == "" {
+		event.WakeSubmission = submitted
+	}
 
 	return event, outcome, appendInboxLineLocked(path, event)
+}
+
+// wakeSubmissionUncertain marks a pending record whose wake was submitted.
+// "Uncertain" because a no-wait send cannot prove the pane accepted it.
+const wakeSubmissionUncertain = "uncertain"
+
+// reserveInboxWake durably marks every pending record of parentID that wakes
+// it (wakes reports which) and holds no wake submission or consumed turn yet,
+// and reports whether it marked any. The caller sends one wake only when this
+// returns true; the marks are written first so a restart never resubmits.
+func reserveInboxWake(parentID string, wakes func(TransitionNotificationEvent) bool) (bool, error) {
+	if strings.TrimSpace(parentID) == "" || !InboxHasPending(parentID) {
+		return false, nil
+	}
+	fileLock, err := acquireInboxLock(parentID)
+	if err != nil {
+		return false, err
+	}
+	defer fileLock.Release()
+	consumedTurnsMu.Lock()
+	defer consumedTurnsMu.Unlock()
+	consumed := loadConsumedTurnsLocked(parentID)
+	inboxWriteMu.Lock()
+	defer inboxWriteMu.Unlock()
+
+	path := InboxPathFor(parentID)
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	var out bytes.Buffer
+	reserved := false
+	if err := forEachInboxLine(f, func(raw []byte) error {
+		var wire inboxWireEvent
+		if json.Unmarshal(raw, &wire) == nil {
+			ev := &wire.TransitionNotificationEvent
+			fp := ev.TurnFingerprint
+			if fp == "" {
+				fp = TurnFingerprint(*ev)
+			}
+			if _, done := consumed[fp]; !done && ev.WakeSubmission == "" && wakes(*ev) {
+				ev.WakeSubmission = wakeSubmissionUncertain
+				line, err := json.Marshal(wire)
+				if err != nil {
+					return err
+				}
+				raw, reserved = line, true
+			}
+		}
+		out.Write(raw)
+		out.WriteByte('\n')
+		return nil
+	}); err != nil {
+		return false, err
+	}
+	_ = f.Close()
+	if !reserved {
+		return false, nil
+	}
+	if err := writeFileDurable(path, out.Bytes(), 0o644); err != nil {
+		return false, err
+	}
+	delete(inboxFingerprintCache, path)
+	return true, nil
 }
 
 // sameInboxTurn reports whether the pending record ev is the turn event
@@ -773,19 +855,27 @@ func (n *TransitionNotifier) wakeCommittedInbox(parent *Instance, event Transiti
 	// wake_on (default: urgent) wake the parent. An info record stays durably
 	// queued and rides the parent's next turn or the info digest; it is never
 	// lost, it just does not buy a turn of its own.
-	if !ResolveInboxConfig(parent.Title).WakesFor(event.Tier) {
+	cfg := ResolveInboxConfig(parent.Title)
+	if !cfg.WakesFor(event.Tier) {
 		_ = BumpInboxStats(parentID, func(s *InboxStats) { s.WakeupsSuppressed++ })
 		commsLog.Debug("wake_nudge_skipped_tier",
 			slog.String("parent", parentID), slog.String("tier", event.Tier), slog.String("turn", event.TurnFingerprint))
 		return
+	}
+	if event.WakeSubmission != "" {
+		return // this turn's wake was already submitted
 	}
 	_ = BumpInboxStats(parentID, func(s *InboxStats) { s.WakeupsUrgent++ })
 	// Issue #1225 Tier-2: now that the record durably landed, wake an IDLE parent
 	// to drain it immediately instead of on its next ~14-min heartbeat. This is
 	// the event-driven trigger — fired the moment the completion is committed,
 	// not on a poll. Best-effort and non-fatal: a dropped nudge is harmless
-	// because this same record is still drained on the parent's next turn.
-	n.fireWakeNudge(parent, event)
+	// because this same record is still drained on the parent's next turn, and
+	// the daemon retries a busy parent once it is idle
+	// (reconcilePendingInboxWakes).
+	n.fireReservedWakeNudge(parent, event, func(ev TransitionNotificationEvent) bool {
+		return ev.Profile == event.Profile && cfg.WakesFor(ev.Tier)
+	})
 }
 
 // pendingSameRecord reports whether the parent's inbox already holds this

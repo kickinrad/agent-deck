@@ -536,10 +536,10 @@ func TestLaunchParent_DefaultOffNoParentSkipsTheTmuxProbe(t *testing.T) {
 }
 
 // The record `add` writes from inside a sub-session with no config is the
-// v1.16.23 record: no parent link, folder-derived group, no parent or
+// v1.16.23 record: no parent link, the default group, no parent or
 // launched-by hint, no note.
 func TestLaunchParent_AddDefaultOffSubsessionCallerIsTopLevel(t *testing.T) {
-	home, cwd, profile := setupAddDefaultPathTest(t)
+	home, _, profile := setupAddDefaultPathTest(t)
 	parentPath := filepath.Join(home, "parent-project")
 	if err := os.MkdirAll(parentPath, 0o755); err != nil {
 		t.Fatal(err)
@@ -555,8 +555,8 @@ func TestLaunchParent_AddDefaultOffSubsessionCallerIsTopLevel(t *testing.T) {
 	if helper.ParentSessionID != "" {
 		t.Fatalf("helper parent %q, want none", helper.ParentSessionID)
 	}
-	if want := session.GroupPathForProject(cwd); helper.GroupPath != want {
-		t.Fatalf("helper group %q, want the folder-derived %q", helper.GroupPath, want)
+	if helper.GroupPath != session.DefaultGroupPath {
+		t.Fatalf("helper group %q, want the default %q", helper.GroupPath, session.DefaultGroupPath)
 	}
 	if _, ok := hints[hintKeyParent]; ok {
 		t.Fatalf("hints %v carry a parent", hints)
