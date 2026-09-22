@@ -106,10 +106,10 @@ func bootstrapDaemonProfile(t *testing.T, profile string) (*TransitionDaemon, *S
 	}
 	t.Cleanup(func() { _ = storage.Close() })
 
-	// Wire the global DB so bindClaudeSessionFromHook's WriteClaudeSessionBinding
-	// persists into the same DB we read back from.
-	statedb.SetGlobal(storage.GetDB())
-	t.Cleanup(func() { statedb.SetGlobal(nil) })
+	// Production notify-daemon dispatches before the TUI initializes a global DB.
+	previous := statedb.GetGlobal()
+	statedb.SetGlobal(nil)
+	t.Cleanup(func() { statedb.SetGlobal(previous) })
 
 	d := NewTransitionDaemon()
 	d.storages[profile] = storage

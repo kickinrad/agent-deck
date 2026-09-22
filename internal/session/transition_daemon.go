@@ -407,7 +407,7 @@ func (d *TransitionDaemon) syncProfile(profile string) time.Duration {
 				// Done-signal / transition-candidate handling stays unguarded so
 				// terminal completions are still observed.
 				if isLiveSessionStatus(inst.Status) && inst.Exists() {
-					inst.UpdateHookStatus(hs)
+					inst.UpdateHookStatusWithDB(hs, storage.GetDB())
 				}
 				hookStatuses[inst.ID] = hs
 				if candidate, ok := terminalHookTransitionCandidate(inst.Tool, hs); ok {
