@@ -113,7 +113,7 @@ export function CreateSessionDialog() {
   const [customModel, setCustomModel] = useState('')
   const [reasoningEffort, setReasoningEffort] = useState('')
   const [path, setPath] = useState('')
-  // Empty delegates root placement to the server's configured default_group.
+  // Empty delegates root placement to the server's built-in sessions group.
   const [groupPath, setGroupPath] = useState('')
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)

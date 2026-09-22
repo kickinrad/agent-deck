@@ -564,9 +564,6 @@ func (d *TransitionDaemon) reconcilePendingInboxWakes(profile string, byID map[s
 		return
 	}
 	for parentID, parent := range byID {
-		if !isConductorInstance(parent) {
-			continue
-		}
 		parent.Status = Status(normalizeStatusString(statuses[parentID]))
 		if !parentIsNudgeableIdle(parent) {
 			continue
@@ -1062,11 +1059,13 @@ func readHookStatusFile(instanceID string) *HookStatus {
 		Status                   string `json:"status"`
 		SessionID                string `json:"session_id"`
 		Event                    string `json:"event"`
+		Source                   string `json:"source"`
 		Timestamp                int64  `json:"ts"`
 		DoneStatus               string `json:"done_status"`
 		DoneSummary              string `json:"done_summary"`
 		TranscriptPath           string `json:"transcript_path"`
 		Cwd                      string `json:"cwd"`
+		ClaudePID                int    `json:"claude_pid"`
 		CodexStartedGeneration   string `json:"codex_started_generation"`
 		CodexCompletedGeneration string `json:"codex_completed_generation"`
 		CodexStartedSessionID    string `json:"codex_started_session_id"`
@@ -1091,11 +1090,13 @@ func readHookStatusFile(instanceID string) *HookStatus {
 		Status:                   raw.Status,
 		SessionID:                raw.SessionID,
 		Event:                    raw.Event,
+		Source:                   raw.Source,
 		UpdatedAt:                updatedAt,
 		DoneStatus:               raw.DoneStatus,
 		DoneSummary:              raw.DoneSummary,
 		TranscriptPath:           raw.TranscriptPath,
 		Cwd:                      raw.Cwd,
+		ClaudePID:                raw.ClaudePID,
 		CodexStartedGeneration:   raw.CodexStartedGeneration,
 		CodexCompletedGeneration: raw.CodexCompletedGeneration,
 		CodexStartedSessionID:    raw.CodexStartedSessionID,

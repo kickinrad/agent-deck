@@ -272,6 +272,15 @@ func NewStorageWithProfile(profile string) (*Storage, error) {
 				storageLog.Warn("json_migration_failed", slog.String("error", migrateErr.Error()))
 				// Continue with empty database rather than failing completely
 			} else {
+				// JSON imports can contain legacy and canonical default-group rows.
+				// Apply the idempotent database migration once more before retiring
+				// the source file so imports receive the same consolidation rules as
+				// an existing database.
+				if normalizeErr := migrateStateDBWithRetry(db); normalizeErr != nil {
+					storageLog.Warn("json_migration_normalization_failed", slog.String("error", normalizeErr.Error()))
+					db.Close()
+					return nil, fmt.Errorf("normalize imported state database: %w", normalizeErr)
+				}
 				storageLog.Info("migrated_from_json",
 					slog.Int("instances", nInst),
 					slog.Int("groups", nGroups))

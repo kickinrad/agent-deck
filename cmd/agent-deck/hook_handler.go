@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -94,6 +95,10 @@ type hookStatusFile struct {
 	// inherited AGENTDECK_INSTANCE_ID) must never bind. omitempty keeps legacy
 	// files byte-identical when the agent sends no cwd.
 	Cwd string `json:"cwd,omitempty"`
+	// ClaudePID is the managed Claude process that emitted this hook. Native
+	// /clear only trusts the root Claude process in this tmux pane: a same-cwd
+	// subagent inherits the instance environment but cannot replace its parent.
+	ClaudePID int `json:"claude_pid,omitempty"`
 }
 
 type hookGenerationControl struct {
@@ -332,6 +337,43 @@ func parentIsDSP() bool {
 	return strings.Contains(string(cmdline), "--dangerously-skip-permissions")
 }
 
+// hookClaudeProcessPID finds the nearest Claude ancestor while the hook is
+// still running. The watcher sees the status after this short-lived hook has
+// exited, so recording the emitting agent PID here is the only durable process
+// provenance available to the later rebind decision. /proc is available on
+// Linux and WSL; other platforms fail closed for the privileged /clear path.
+func hookClaudeProcessPID() int {
+	pid := os.Getppid()
+	for depth := 0; pid > 1 && depth < 12; depth++ {
+		cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+		if err != nil {
+			return 0
+		}
+		command := strings.ToLower(strings.ReplaceAll(string(cmdline), "\x00", " "))
+		if strings.Contains(command, "claude") && !strings.Contains(command, "hook-handler") {
+			return pid
+		}
+		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			return 0
+		}
+		closing := strings.LastIndexByte(string(stat), ')')
+		if closing < 0 {
+			return 0
+		}
+		fields := strings.Fields(string(stat)[closing+1:])
+		if len(fields) < 2 {
+			return 0
+		}
+		next, err := strconv.Atoi(fields[1]) // state, then parent PID
+		if err != nil || next <= 1 || next == pid {
+			return 0
+		}
+		pid = next
+	}
+	return 0
+}
+
 // writeHookStatus writes a hook status file atomically for one instance.
 // The optional done argument carries a completion sentinel (issue #1186);
 // when supplied its status/summary are persisted alongside the hook status.
@@ -375,6 +417,7 @@ func writeHookStatusWithScan(instanceID, status, sessionID, event, source, cwd s
 		Source:    strings.TrimSpace(source),
 		Timestamp: time.Now().Unix(),
 		Cwd:       strings.TrimSpace(cwd),
+		ClaudePID: hookClaudeProcessPID(),
 	}
 	if scan.signal != nil {
 		statusFile.DoneStatus = scan.signal.Status

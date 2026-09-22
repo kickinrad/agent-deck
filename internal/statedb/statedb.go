@@ -475,21 +475,27 @@ func (s *StateDB) Migrate() error {
 	// settings always win; memberships, including archived rows, are preserved.
 	// This runs after the legacy column repair and in the schema transaction, so
 	// reload/import/remove cannot resurrect a legacy default between read/save.
-	if _, err := tx.Exec(`
-		INSERT OR IGNORE INTO groups (path, name, expanded, sort_order, default_path, max_concurrent)
-		SELECT 'sessions', 'sessions', expanded, sort_order, default_path, max_concurrent
-		FROM groups
-		WHERE path IN ('my-sessions', 'My Sessions')
-		ORDER BY CASE path WHEN 'my-sessions' THEN 0 ELSE 1 END
-		LIMIT 1
-	`); err != nil {
-		return fmt.Errorf("statedb: create sessions default group: %w", err)
+	var legacyDefaultGroups int
+	if err := tx.QueryRow(`SELECT COUNT(1) FROM groups WHERE path IN ('my-sessions', 'My Sessions')`).Scan(&legacyDefaultGroups); err != nil {
+		return fmt.Errorf("statedb: inspect legacy default groups: %w", err)
 	}
-	if _, err := tx.Exec(`UPDATE instances SET group_path = 'sessions' WHERE group_path IN ('my-sessions', 'My Sessions')`); err != nil {
-		return fmt.Errorf("statedb: migrate default group memberships: %w", err)
-	}
-	if _, err := tx.Exec(`DELETE FROM groups WHERE path IN ('my-sessions', 'My Sessions')`); err != nil {
-		return fmt.Errorf("statedb: remove legacy default groups: %w", err)
+	if legacyDefaultGroups > 0 {
+		if _, err := tx.Exec(`
+			INSERT OR IGNORE INTO groups (path, name, expanded, sort_order, default_path, max_concurrent)
+			SELECT 'sessions', 'sessions', expanded, sort_order, default_path, max_concurrent
+			FROM groups
+			WHERE path IN ('my-sessions', 'My Sessions')
+			ORDER BY CASE path WHEN 'my-sessions' THEN 0 ELSE 1 END
+			LIMIT 1
+		`); err != nil {
+			return fmt.Errorf("statedb: create sessions default group: %w", err)
+		}
+		if _, err := tx.Exec(`UPDATE instances SET group_path = 'sessions' WHERE group_path IN ('my-sessions', 'My Sessions')`); err != nil {
+			return fmt.Errorf("statedb: migrate default group memberships: %w", err)
+		}
+		if _, err := tx.Exec(`DELETE FROM groups WHERE path IN ('my-sessions', 'My Sessions')`); err != nil {
+			return fmt.Errorf("statedb: remove legacy default groups: %w", err)
+		}
 	}
 
 	// instance heartbeats

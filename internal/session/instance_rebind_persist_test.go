@@ -190,6 +190,7 @@ func TestExplicitClearRebindPersistsNewUUIDForRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	inst := NewInstanceWithTool("clear-persist", projectPath, "claude")
+	inst.managedClaudeRootCheck = func(int) bool { return true }
 	oldID := "5ea244ce-0000-0000-0000-0000000000ca"
 	newID := "2266314c-0000-0000-0000-0000000000cb"
 	if err := db.SaveInstance(&statedb.InstanceRow{ID: inst.ID, Title: inst.Title, ProjectPath: projectPath, GroupPath: inst.GroupPath, Command: inst.Command, Tool: "claude", Status: "idle", CreatedAt: time.Now(), ToolData: json.RawMessage(`{"claude_session_id":"` + oldID + `"}`)}); err != nil {
@@ -205,7 +206,7 @@ func TestExplicitClearRebindPersistsNewUUIDForRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	inst.ClaudeSessionID = oldID
-	inst.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: newID, Event: "SessionStart", Source: "clear", Cwd: projectPath, UpdatedAt: now})
+	inst.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: newID, Event: "SessionStart", Source: "clear", Cwd: projectPath, ClaudePID: 42, UpdatedAt: now})
 	if got := readClaudeSessionIDFromDB(t, db, inst.ID); got != newID {
 		t.Fatalf("restart binding = %q, want cleared UUID %q", got, newID)
 	}

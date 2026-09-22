@@ -379,6 +379,14 @@ agent-deck fleet recover         # dry run: the plan, in order, with waits
 agent-deck fleet recover --yes   # run it
 ```
 
+For a protected identity, select its full ID explicitly:
+
+```bash
+agent-deck fleet recover --yes --session-id <full-id>
+```
+
+Groups organize the sidebar and do not select recovery members.
+
 `fleet recover` restarts the down sessions **one at a time** with ~5s between
 boots and verifies each boot before starting the next. Do not replace it with a
 loop that restarts everything at once: simultaneous agent boots are what fork a

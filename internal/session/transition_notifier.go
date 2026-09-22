@@ -438,11 +438,12 @@ func resolveParentNotificationTarget(child *Instance, byID map[string]*Instance)
 	if parent.ID == child.ID {
 		return nil
 	}
-	if isConductorInstance(parent) {
-		_ = parent.UpdateStatus()
-		if !isLiveSessionStatus(parent.Status) {
-			return nil
-		}
+	// A parent link is explicit delegation regardless of its title or group.
+	// Refresh every actual parent before deciding whether an actionable report
+	// can wake it; a stale idle status for a busy ordinary root would queue input.
+	_ = parent.UpdateStatus()
+	if !isLiveSessionStatus(parent.Status) {
+		return nil
 	}
 	return parent
 }

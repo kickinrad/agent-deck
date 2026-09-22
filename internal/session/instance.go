@@ -685,6 +685,10 @@ type Instance struct {
 	// Gateway health cache for Hermes sessions (volatile, not persisted).
 	hermesGatewayCheckedAt time.Time
 	hermesGatewayOK        bool
+
+	// managedClaudeRootCheck is a test seam for the process-provenance check
+	// used by native /clear. Production instances leave it nil.
+	managedClaudeRootCheck func(int) bool
 }
 
 // newSpawnGenWatch bumps the generation and hands back both the new generation
@@ -6640,8 +6644,9 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 }
 
 // isExplicitClaudeClearStart accepts only Claude's native /clear SessionStart
-// identity for this instance's exact primary project. It intentionally does not
-// treat generic SessionStart, resume, or an empty cwd as equivalent evidence.
+// identity for this instance's exact primary project and managed root process.
+// It intentionally does not treat generic SessionStart, resume, or an empty
+// cwd as equivalent evidence.
 func (i *Instance) isExplicitClaudeClearStart(status *HookStatus) bool {
 	if status == nil || !strings.EqualFold(strings.TrimSpace(status.Event), "SessionStart") || !strings.EqualFold(strings.TrimSpace(status.Source), "clear") {
 		return false
@@ -6649,7 +6654,81 @@ func (i *Instance) isExplicitClaudeClearStart(status *HookStatus) bool {
 	if strings.TrimSpace(status.Cwd) == "" || strings.TrimSpace(i.ProjectPath) == "" {
 		return false
 	}
-	return normalizePath(status.Cwd) == normalizePath(i.ProjectPath)
+	if normalizePath(status.Cwd) != normalizePath(i.ProjectPath) || status.ClaudePID <= 0 {
+		return false
+	}
+	if i.managedClaudeRootCheck != nil {
+		return i.managedClaudeRootCheck(status.ClaudePID)
+	}
+	return i.isManagedRootClaudeProcess(status.ClaudePID)
+}
+
+// isManagedRootClaudeProcess verifies that pid is the first Claude process
+// below one of this instance's tmux panes. A child Claude process can share the
+// same cwd and inherited AGENTDECK_INSTANCE_ID, but it follows the managed root
+// in the pane process tree and therefore cannot vouch for a /clear rebind.
+func (i *Instance) isManagedRootClaudeProcess(pid int) bool {
+	if pid <= 0 || i.tmuxSession == nil || !i.tmuxSession.Exists() {
+		return false
+	}
+	paneOutput, err := tmux.OutputBounded(i.TmuxSocketName, "list-panes", "-s", "-t", i.tmuxSession.Name, "-F", "#{pane_pid}")
+	if err != nil {
+		return false
+	}
+	panePIDs, err := parsePositivePIDs(paneOutput, "tmux pane")
+	if err != nil || len(panePIDs) == 0 {
+		return false
+	}
+	procTable, err := exec.Command("ps", "-eo", "pid=,ppid=,comm=").Output()
+	if err != nil || len(procTable) == 0 {
+		return false
+	}
+	return isManagedRootClaudeProcessFromTable(panePIDs, pid, procTable)
+}
+
+// isManagedRootClaudeProcessFromTable is the pure classification behind the
+// runtime probe. A malformed process snapshot fails closed: allowing an
+// unverified /clear would let a subagent overwrite its parent's binding.
+func isManagedRootClaudeProcessFromTable(panePIDs []int, candidatePID int, procTable []byte) bool {
+	if candidatePID <= 0 || len(panePIDs) == 0 {
+		return false
+	}
+	childrenByParent, err := parsePSParentChildMap(procTable)
+	if err != nil {
+		return false
+	}
+	commands := parsePSCommandNames(procTable)
+	type queued struct {
+		pid             int
+		rootClaudeFound bool
+	}
+	seen := make(map[int]bool)
+	queue := make([]queued, 0, len(panePIDs))
+	for _, panePID := range panePIDs {
+		if panePID > 0 && !seen[panePID] {
+			seen[panePID] = true
+			queue = append(queue, queued{pid: panePID})
+		}
+	}
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		isClaude := strings.Contains(strings.ToLower(commands[node.pid]), "claude")
+		if isClaude && !node.rootClaudeFound {
+			if node.pid == candidatePID {
+				return true
+			}
+			node.rootClaudeFound = true
+		}
+		for _, child := range childrenByParent[node.pid] {
+			if child <= 0 || seen[child] {
+				continue
+			}
+			seen[child] = true
+			queue = append(queue, queued{pid: child, rootClaudeFound: node.rootClaudeFound})
+		}
+	}
+	return false
 }
 
 // bindCodexSessionFromHook is the Codex counterpart of

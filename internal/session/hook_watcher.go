@@ -159,6 +159,9 @@ type HookStatus struct {
 	// id may bind — empty (legacy files, agents that send no cwd) means "no
 	// evidence either way" and never blocks.
 	Cwd string
+	// ClaudePID identifies the emitting Claude process and is required for a
+	// native /clear rebind to prove it came from this pane's root process.
+	ClaudePID int
 }
 
 // hookGenerationForInstance resolves generation authority by instance, not by
@@ -495,6 +498,7 @@ func (w *StatusFileWatcher) scanDirEntriesInto(out map[string]*HookStatus, dir s
 			DoneSummary              string `json:"done_summary"`
 			TranscriptPath           string `json:"transcript_path"`
 			Cwd                      string `json:"cwd"`
+			ClaudePID                int    `json:"claude_pid"`
 			CodexStartedGeneration   string `json:"codex_started_generation"`
 			CodexCompletedGeneration string `json:"codex_completed_generation"`
 			CodexStartedSessionID    string `json:"codex_started_session_id"`
@@ -518,6 +522,7 @@ func (w *StatusFileWatcher) scanDirEntriesInto(out map[string]*HookStatus, dir s
 			DoneSummary:              raw.DoneSummary,
 			TranscriptPath:           raw.TranscriptPath,
 			Cwd:                      raw.Cwd,
+			ClaudePID:                raw.ClaudePID,
 			CodexStartedGeneration:   raw.CodexStartedGeneration,
 			CodexCompletedGeneration: raw.CodexCompletedGeneration,
 			CodexStartedSessionID:    raw.CodexStartedSessionID,

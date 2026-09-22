@@ -1,6 +1,7 @@
 package session
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -22,6 +23,45 @@ func newTestStorage(t *testing.T) *Storage {
 	}
 	t.Cleanup(func() { db.Close() })
 	return &Storage{db: db, dbPath: dbPath, profile: "_test"}
+}
+
+func TestNewStorageWithProfile_NormalizesLegacyGroupsFromJSONImport(t *testing.T) {
+	setupSessionXDGPathEnv(t)
+	profile := "json-group-migration"
+	profileDir, err := GetProfileDir(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(profileDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	jsonData := `{"instances":[{"id":"legacy-active","title":"active","project_path":"/tmp/a","group_path":"my-sessions","command":"sh","tool":"shell","status":"idle"},{"id":"legacy-archived","title":"archived","project_path":"/tmp/b","group_path":"My Sessions","command":"sh","tool":"shell","status":"idle"}],"groups":[{"name":"My Sessions","path":"my-sessions","expanded":false,"max_concurrent":2},{"name":"Sessions","path":"sessions","expanded":true,"max_concurrent":7}]}`
+	if err := os.WriteFile(filepath.Join(profileDir, "sessions.json"), []byte(jsonData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := NewStorageWithProfile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = storage.Close() })
+	instances, groups, err := storage.LoadWithGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || groups[0].Path != DefaultGroupPath || groups[0].MaxConcurrent != 7 {
+		t.Fatalf("groups after JSON import = %+v, want canonical sessions settings", groups)
+	}
+	if len(instances) != 2 {
+		t.Fatalf("instances after JSON import = %d, want 2", len(instances))
+	}
+	for _, inst := range instances {
+		if inst.GroupPath != DefaultGroupPath {
+			t.Fatalf("instance %s group = %q, want %q", inst.ID, inst.GroupPath, DefaultGroupPath)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(profileDir, "sessions.json.migrated")); err != nil {
+		t.Fatalf("migrated JSON backup missing: %v", err)
+	}
 }
 
 // TestStorageUpdatedAtTimestamp verifies that SaveWithGroups sets the UpdatedAt timestamp
