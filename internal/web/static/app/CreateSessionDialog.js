@@ -10,6 +10,7 @@ import {
 import { Icon, ICONS } from './icons.js'
 import { apiFetch } from './api.js'
 import { displayLabelForTool, resolveCreateSessionPickerTools } from './pickerTools.js'
+import { menuModelSignal } from './dataModel.js'
 
 const CUSTOM_MODEL = '__custom__'
 
@@ -115,6 +116,8 @@ export function CreateSessionDialog() {
   const [customModel, setCustomModel] = useState('')
   const [reasoningEffort, setReasoningEffort] = useState('')
   const [path, setPath] = useState('')
+  // Empty delegates root placement to the server's built-in sessions group.
+  const [groupPath, setGroupPath] = useState('')
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
   const [seededFor, setSeededFor] = useState(null)
@@ -135,6 +138,7 @@ export function CreateSessionDialog() {
     const seedTool = shownTools.includes(ctx.tool) ? ctx.tool : shownTools[0]
     setTool(seedTool)
     setPath(ctx.defaultPath || '')
+    setGroupPath(ctx.groupPath || '')
     // Only prefill a model the catalog recognizes: an unknown id would render
     // as a blank <select> and, on submit, become an explicit per-session
     // override (see resolveClaudeLaunchModel, internal/session/claude.go:611).
@@ -158,7 +162,7 @@ export function CreateSessionDialog() {
     setSubmitting(true)
     try {
       const payload = { title, tool, projectPath: path }
-      if (ctx.groupPath) payload.groupPath = ctx.groupPath
+      if (groupPath) payload.groupPath = groupPath
       const modelId = selectedModelId()
       if (modelId) payload.modelId = modelId
       if (reasoningEffort) payload.reasoningEffort = reasoningEffort
@@ -187,6 +191,7 @@ export function CreateSessionDialog() {
   const handleBackdropClick = (e) => { if (e.target === e.currentTarget) close() }
   const modelIDs = modelIDsForTool(tool)
   const reasoningEfforts = reasoningEffortsForTool(tool)
+  const groups = menuModelSignal.value.groups || []
   const needsCustomModel = modelId === CUSTOM_MODEL
   const submitDisabled = submitting || !title || !path || (needsCustomModel && !customModel.trim())
 
@@ -214,6 +219,15 @@ export function CreateSessionDialog() {
           <div class="field">
             <label>WORKING DIR</label>
             <input required value=${path} onInput=${e => setPath(e.target.value)} placeholder="/absolute/path/to/project"/>
+          </div>
+          <div class="field">
+            <label>GROUP</label>
+            <select value=${groupPath} onInput=${e => setGroupPath(e.target.value)}>
+          <option value="">DEFAULT GROUP</option>
+              ${groups.filter(g => g.path && g.path !== 'default').map(g => html`
+                <option key=${g.path} value=${g.path}>${g.label || g.path}</option>
+              `)}
+            </select>
           </div>
           <div class="field">
             <label>TOOL</label>

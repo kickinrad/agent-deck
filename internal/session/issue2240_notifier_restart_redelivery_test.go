@@ -17,9 +17,8 @@ package session
 //     notifies nothing until a REAL transition happens after start — while a
 //     child whose status changed WHILE the daemon was down is still notified
 //     once.
-//  2. The wake-nudge fires only when the committed record is one the parent's
-//     next drain would actually deliver, never for a turn the parent's
-//     consumed-turn ledger already holds.
+//  2. Routine transitions are durable telemetry and never wake the parent;
+//     explicit completion events own the separate actionable wake path.
 
 import (
 	"encoding/json"
@@ -178,8 +177,8 @@ func TestNotifierRestart_RestartDoesNotRenotifyStillParkedChild(t *testing.T) {
 	if got := readInboxLines(t, f.parent.ID); len(got) != 1 {
 		t.Fatalf("real transition must commit exactly one record, got %+v", got)
 	}
-	if n := f.nudges(); n != 1 {
-		t.Fatalf("real transition must nudge once, got %d", n)
+	if n := f.nudges(); n != 0 {
+		t.Fatalf("routine transition woke parent: got %d", n)
 	}
 	if _, err := DrainInboxForParent(f.parent.ID); err != nil {
 		t.Fatalf("drain: %v", err)
@@ -195,8 +194,8 @@ func TestNotifierRestart_RestartDoesNotRenotifyStillParkedChild(t *testing.T) {
 	if got := readInboxLines(t, f.parent.ID); len(got) != 0 {
 		t.Fatalf("restart re-committed an already-notified turn: %+v", got)
 	}
-	if n := f.nudges(); n != 1 {
-		t.Fatalf("restart fired a phantom wake-nudge: total nudges %d, want 1", n)
+	if n := f.nudges(); n != 0 {
+		t.Fatalf("restart fired a phantom wake-nudge: total nudges %d", n)
 	}
 }
 
@@ -229,8 +228,8 @@ func TestNotifierRestart_ChildChangedWhileDownIsNotifiedOnce(t *testing.T) {
 	if len(got) != 1 || got[0].ToStatus != "waiting" {
 		t.Fatalf("a status change during downtime must be notified exactly once, got %+v", got)
 	}
-	if n := f.nudges(); n != 2 {
-		t.Fatalf("expected exactly one nudge for the downtime transition (2 total), got %d", n)
+	if n := f.nudges(); n != 0 {
+		t.Fatalf("routine downtime transition woke parent: got %d", n)
 	}
 }
 
@@ -265,8 +264,8 @@ func TestNotifierRestart_CorruptStateFileSeedsFresh(t *testing.T) {
 	}
 }
 
-// A real transition after start is still delivered and nudged: seeding must
-// not turn the daemon silent.
+// A real transition after start is still delivered: seeding must not turn the
+// daemon silent, and routine delivery must not wake a model.
 func TestNotifierRestart_RealTransitionAfterStartStillNotifies(t *testing.T) {
 	f := newRestartFixture(t, "waiting")
 
@@ -280,8 +279,8 @@ func TestNotifierRestart_RealTransitionAfterStartStillNotifies(t *testing.T) {
 	if got := readInboxLines(t, f.parent.ID); len(got) != 1 {
 		t.Fatalf("real transition after seed must commit once, got %+v", got)
 	}
-	if n := f.nudges(); n != 1 {
-		t.Fatalf("real transition after seed must nudge once, got %d", n)
+	if n := f.nudges(); n != 0 {
+		t.Fatalf("real transition after seed woke parent: got %d", n)
 	}
 }
 
