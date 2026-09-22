@@ -28,7 +28,7 @@ func TestIssue1553_RemoteSessionsNestUnderGroups(t *testing.T) {
 	sessions := []session.RemoteSessionInfo{
 		{ID: "a", Title: "api-1", Group: "work", Status: "running"},
 		{ID: "b", Title: "api-2", Group: "work/api", Status: "idle"},
-		{ID: "c", Title: "loose", Group: "", Status: "waiting"}, // -> my-sessions
+		{ID: "c", Title: "loose", Group: "", Status: "waiting"}, // -> sessions
 	}
 
 	items := buildRemoteFlatItems("dev", sessions, nil)
@@ -52,7 +52,7 @@ func TestIssue1553_RemoteSessionsNestUnderGroups(t *testing.T) {
 	}
 
 	// The ungrouped session must nest under the default group header.
-	if !headerPaths["remotes/dev/my-sessions"] {
+	if !headerPaths["remotes/dev/sessions"] {
 		t.Errorf("missing default-group header for ungrouped session; headers=%v", headerPaths)
 	}
 	if !headerPaths["remotes/dev/work"] || !headerPaths["remotes/dev/work/api"] {
@@ -66,8 +66,8 @@ func TestIssue1553_RemoteSessionsNestUnderGroups(t *testing.T) {
 	if got := byID["b"]; got.Level != 3 || got.Path != "remotes/dev/work/api" {
 		t.Errorf("session b (group work/api) = level %d path %q, want level 3 path remotes/dev/work/api", got.Level, got.Path)
 	}
-	if got := byID["c"]; got.Level != 2 || got.Path != "remotes/dev/my-sessions" {
-		t.Errorf("session c (ungrouped) = level %d path %q, want level 2 path remotes/dev/my-sessions", got.Level, got.Path)
+	if got := byID["c"]; got.Level != 2 || got.Path != "remotes/dev/sessions" {
+		t.Errorf("session c (ungrouped) = level %d path %q, want level 2 path remotes/dev/sessions", got.Level, got.Path)
 	}
 }
 
@@ -159,7 +159,7 @@ func TestIssue1553_IntegrationThroughRebuild(t *testing.T) {
 	if len(rem) == 0 {
 		t.Fatal("no remote items in flatItems after rebuild")
 	}
-	// At least the remote header + 3 sub-group headers (my-sessions, work,
+	// At least the remote header + 3 sub-group headers (sessions, work,
 	// work/api) + 3 sessions.
 	headers, remoteSessions := 0, 0
 	var workHeader session.Item
@@ -176,7 +176,7 @@ func TestIssue1553_IntegrationThroughRebuild(t *testing.T) {
 		}
 	}
 	if headers < 4 {
-		t.Errorf("headers = %d, want >= 4 (remote + my-sessions + work + work/api)", headers)
+		t.Errorf("headers = %d, want >= 4 (remote + sessions + work + work/api)", headers)
 	}
 	if remoteSessions != 3 {
 		t.Errorf("remote sessions = %d, want 3", remoteSessions)

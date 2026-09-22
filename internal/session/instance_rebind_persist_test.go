@@ -174,6 +174,44 @@ func TestRebindPersistsClaudeSessionIDToDB(t *testing.T) {
 	}
 }
 
+// An explicit native /clear may arrive before the new transcript is measurably
+// newer. Its UUID must still reach durable tool_data so a restarted process
+// resumes the cleared conversation rather than resurrecting the old one.
+func TestExplicitClearRebindPersistsNewUUIDForRestart(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(tmpHome, ".claude"))
+	ClearUserConfigCache()
+	t.Cleanup(ClearUserConfigCache)
+	db := withTempGlobalStateDB(t)
+
+	projectPath := filepath.Join(tmpHome, "project")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inst := NewInstanceWithTool("clear-persist", projectPath, "claude")
+	inst.managedClaudeRootCheck = func(int) bool { return true }
+	oldID := "5ea244ce-0000-0000-0000-0000000000ca"
+	newID := "2266314c-0000-0000-0000-0000000000cb"
+	if err := db.SaveInstance(&statedb.InstanceRow{ID: inst.ID, Title: inst.Title, ProjectPath: projectPath, GroupPath: inst.GroupPath, Command: inst.Command, Tool: "claude", Status: "idle", CreatedAt: time.Now(), ToolData: json.RawMessage(`{"claude_session_id":"` + oldID + `"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := seedClaudeJSONL(t, inst, oldID, 200, 1024)
+	newPath := seedClaudeJSONL(t, inst, newID, 1, 8)
+	now := time.Now()
+	if err := os.Chtimes(oldPath, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(newPath, now, now); err != nil {
+		t.Fatal(err)
+	}
+	inst.ClaudeSessionID = oldID
+	inst.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: newID, Event: "SessionStart", Source: "clear", Cwd: projectPath, ClaudePID: 42, UpdatedAt: now})
+	if got := readClaudeSessionIDFromDB(t, db, inst.ID); got != newID {
+		t.Fatalf("restart binding = %q, want cleared UUID %q", got, newID)
+	}
+}
+
 // TestBindPersistsClaudeSessionIDToDB covers the cold-start branch at
 // instance.go:3599 — when an instance has no ClaudeSessionID yet and
 // the very first hook event arrives. This branch is `action: bind`
