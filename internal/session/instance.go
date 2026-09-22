@@ -6431,6 +6431,13 @@ func (i *Instance) syncClaudeSessionFromDisk() {
 // UpdateHookStatus updates the instance's hook-based status fields.
 // Called by StatusFileWatcher when a hook status file changes.
 func (i *Instance) UpdateHookStatus(status *HookStatus) {
+	i.UpdateHookStatusWithDB(status, statedb.GetGlobal())
+}
+
+// UpdateHookStatusWithDB applies a hook using the instance's owning database.
+// Multi-profile callers such as notify-daemon must pass their profile's DB;
+// they do not initialize the TUI's process-global database.
+func (i *Instance) UpdateHookStatusWithDB(status *HookStatus, db *statedb.StateDB) {
 	if status == nil {
 		return
 	}
@@ -6545,7 +6552,7 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 		// Cold start — no session bound yet. Accept the first candidate
 		// unconditionally; there is nothing to protect.
 		if i.ClaudeSessionID == "" {
-			i.bindClaudeSessionFromHook(sessionID, hookSource, status.Event, "bind")
+			i.bindClaudeSessionFromHook(sessionID, hookSource, status.Event, "bind", db)
 			return
 		}
 		// Claude explicitly identifies an in-pane /clear with a SessionStart
@@ -6606,7 +6613,7 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 				}
 			}
 		}
-		i.bindClaudeSessionFromHook(sessionID, hookSource, status.Event, "rebind")
+		i.bindClaudeSessionFromHook(sessionID, hookSource, status.Event, "rebind", db)
 	case IsCodexCompatible(i.Tool):
 		if sessionID == i.CodexSessionID {
 			return
@@ -6630,7 +6637,7 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 			)
 			return
 		}
-		i.bindCodexSessionFromHook(sessionID, status.Event)
+		i.bindCodexSessionFromHook(sessionID, status.Event, db)
 	case i.Tool == "gemini":
 		if sessionID == i.GeminiSessionID {
 			return
@@ -6638,7 +6645,7 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 		// Quality gate: only accept when candidate session appears valid on disk,
 		// OR when current session is empty (first detection/bootstrap).
 		if i.GeminiSessionID == "" || geminiSessionHasConversationData(sessionID, i.ProjectPath) {
-			i.bindGeminiSessionFromHook(sessionID, status.Event)
+			i.bindGeminiSessionFromHook(sessionID, status.Event, db)
 		}
 	}
 }
@@ -6739,7 +6746,7 @@ func isManagedRootClaudeProcessFromTable(panePIDs []int, candidatePID int, procT
 // DB-direct consumers and peer agent-deck processes observe the new
 // codex_session_id immediately, instead of reloading the stale row and
 // clobbering the in-memory mutation on the next save cycle.
-func (i *Instance) bindCodexSessionFromHook(sessionID, hookEvent string) {
+func (i *Instance) bindCodexSessionFromHook(sessionID, hookEvent string, db *statedb.StateDB) {
 	sessionLog.Debug("codex_session_update_from_hook",
 		slog.String("old_id", i.CodexSessionID),
 		slog.String("new_id", sessionID),
@@ -6762,7 +6769,7 @@ func (i *Instance) bindCodexSessionFromHook(sessionID, hookEvent string) {
 	// producing a runaway loop of fresh "rebind" decisions on every
 	// poll. WriteCodexSessionBinding rewrites only the typed schema
 	// fields via json_set, leaving every other tool_data key untouched.
-	if db := statedb.GetGlobal(); db != nil {
+	if db != nil {
 		if err := db.WriteCodexSessionBinding(i.ID, sessionID, i.CodexDetectedAt); err != nil {
 			sessionLog.Warn("codex_session_rebind_persist_failed",
 				slog.String("instance_id", i.ID),
@@ -6778,7 +6785,7 @@ func (i *Instance) bindCodexSessionFromHook(sessionID, hookEvent string) {
 // geminiSessionHasConversationData(...)) is enforced by the caller in
 // UpdateHookStatus before this function is invoked, mirroring the
 // invariant the inlined pre-#1139 code preserved.
-func (i *Instance) bindGeminiSessionFromHook(sessionID, hookEvent string) {
+func (i *Instance) bindGeminiSessionFromHook(sessionID, hookEvent string, db *statedb.StateDB) {
 	sessionLog.Debug("gemini_session_update_from_hook",
 		slog.String("old_id", i.GeminiSessionID),
 		slog.String("new_id", sessionID),
@@ -6800,7 +6807,7 @@ func (i *Instance) bindGeminiSessionFromHook(sessionID, hookEvent string) {
 	// row and clobbering this instance's in-memory state. The targeted
 	// json_set UPDATE atomically rewrites only $.gemini_session_id and
 	// $.gemini_detected_at, preserving the rest of tool_data.
-	if db := statedb.GetGlobal(); db != nil {
+	if db != nil {
 		if err := db.WriteGeminiSessionBinding(i.ID, sessionID, i.GeminiDetectedAt); err != nil {
 			sessionLog.Warn("gemini_session_rebind_persist_failed",
 				slog.String("instance_id", i.ID),
@@ -10954,7 +10961,7 @@ func sessionConversationMtime(inst *Instance, sessionID string) time.Time {
 // the ID into the tmux environment so a future restart's
 // capture-resume pattern picks it up. `action` is "bind" (cold start)
 // or "rebind" (replacing an existing ID).
-func (i *Instance) bindClaudeSessionFromHook(sessionID, hookSource, hookEvent, action string) {
+func (i *Instance) bindClaudeSessionFromHook(sessionID, hookSource, hookEvent, action string, db *statedb.StateDB) {
 	sessionLog.Debug("claude_session_update_from_hook",
 		slog.String("old_id", i.ClaudeSessionID),
 		slog.String("new_id", sessionID),
@@ -10997,7 +11004,7 @@ func (i *Instance) bindClaudeSessionFromHook(sessionID, hookSource, hookEvent, a
 	// synchronously here, not because clobbering is impossible — a
 	// later peer reload that observes the new ID will short-circuit at
 	// the `sessionID == i.ClaudeSessionID` check in UpdateHookStatus.
-	if db := statedb.GetGlobal(); db != nil {
+	if db != nil {
 		if err := db.WriteClaudeSessionBinding(i.ID, sessionID, i.ClaudeDetectedAt); err != nil {
 			sessionLog.Warn("claude_session_rebind_persist_failed",
 				slog.String("instance_id", i.ID),
