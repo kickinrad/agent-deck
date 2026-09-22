@@ -270,7 +270,8 @@ func NewStorageWithProfile(profile string) (*Storage, error) {
 			nInst, nGroups, migrateErr := statedb.MigrateFromJSON(jsonPath, db)
 			if migrateErr != nil {
 				storageLog.Warn("json_migration_failed", slog.String("error", migrateErr.Error()))
-				// Continue with empty database rather than failing completely
+				db.Close()
+				return nil, fmt.Errorf("migrate sessions.json: %w", migrateErr)
 			} else {
 				// JSON imports can contain legacy and canonical default-group rows.
 				// Apply the idempotent database migration once more before retiring

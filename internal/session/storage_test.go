@@ -64,6 +64,40 @@ func TestNewStorageWithProfile_NormalizesLegacyGroupsFromJSONImport(t *testing.T
 	}
 }
 
+func TestNewStorageWithProfile_NormalizesLegacyMembershipsWithoutGroupsFromJSONImport(t *testing.T) {
+	setupSessionXDGPathEnv(t)
+	profile := "json-membership-migration"
+	profileDir, err := GetProfileDir(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(profileDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Groups were optional in sessions.json. The migration must still create
+	// sessions and move every legacy membership rather than leaving invisible
+	// rows behind a removed default group.
+	jsonData := `{"instances":[{"id":"legacy-member","title":"member","project_path":"/tmp/a","group_path":"my-sessions","command":"sh","tool":"shell","status":"idle"}]}`
+	if err := os.WriteFile(filepath.Join(profileDir, "sessions.json"), []byte(jsonData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := NewStorageWithProfile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = storage.Close() })
+	instances, groups, err := storage.LoadWithGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || groups[0].Path != DefaultGroupPath {
+		t.Fatalf("groups after optional-group JSON import = %+v, want sessions", groups)
+	}
+	if len(instances) != 1 || instances[0].GroupPath != DefaultGroupPath {
+		t.Fatalf("instances after optional-group JSON import = %+v, want sessions membership", instances)
+	}
+}
+
 // TestStorageUpdatedAtTimestamp verifies that SaveWithGroups sets the UpdatedAt timestamp
 // and GetUpdatedAt() returns it correctly.
 func TestStorageUpdatedAtTimestamp(t *testing.T) {

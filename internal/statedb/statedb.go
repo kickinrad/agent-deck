@@ -475,11 +475,14 @@ func (s *StateDB) Migrate() error {
 	// settings always win; memberships, including archived rows, are preserved.
 	// This runs after the legacy column repair and in the schema transaction, so
 	// reload/import/remove cannot resurrect a legacy default between read/save.
-	var legacyDefaultGroups int
+	var legacyDefaultGroups, legacyDefaultMemberships int
 	if err := tx.QueryRow(`SELECT COUNT(1) FROM groups WHERE path IN ('my-sessions', 'My Sessions')`).Scan(&legacyDefaultGroups); err != nil {
 		return fmt.Errorf("statedb: inspect legacy default groups: %w", err)
 	}
-	if legacyDefaultGroups > 0 {
+	if err := tx.QueryRow(`SELECT COUNT(1) FROM instances WHERE group_path IN ('my-sessions', 'My Sessions')`).Scan(&legacyDefaultMemberships); err != nil {
+		return fmt.Errorf("statedb: inspect legacy default memberships: %w", err)
+	}
+	if legacyDefaultGroups > 0 || legacyDefaultMemberships > 0 {
 		if _, err := tx.Exec(`
 			INSERT OR IGNORE INTO groups (path, name, expanded, sort_order, default_path, max_concurrent)
 			SELECT 'sessions', 'sessions', expanded, sort_order, default_path, max_concurrent
@@ -489,6 +492,15 @@ func (s *StateDB) Migrate() error {
 			LIMIT 1
 		`); err != nil {
 			return fmt.Errorf("statedb: create sessions default group: %w", err)
+		}
+		// JSON imports can omit optional groups entirely while retaining legacy
+		// instance memberships. In that shape there is no legacy row to copy,
+		// so create the built-in group only when canonical settings do not exist.
+		if _, err := tx.Exec(`
+			INSERT OR IGNORE INTO groups (path, name, expanded, sort_order, default_path, max_concurrent)
+			VALUES ('sessions', 'sessions', 1, 0, '', 0)
+		`); err != nil {
+			return fmt.Errorf("statedb: ensure sessions default group: %w", err)
 		}
 		if _, err := tx.Exec(`UPDATE instances SET group_path = 'sessions' WHERE group_path IN ('my-sessions', 'My Sessions')`); err != nil {
 			return fmt.Errorf("statedb: migrate default group memberships: %w", err)
