@@ -439,9 +439,12 @@ func resolveParentNotificationTarget(child *Instance, byID map[string]*Instance)
 		return nil
 	}
 	// A parent link is explicit delegation regardless of its title or group.
-	// Refresh every actual parent before deciding whether an actionable report
-	// can wake it; a stale idle status for a busy ordinary root would queue input.
-	_ = parent.UpdateStatus()
+	// Refresh a live pane before deciding whether an actionable report can wake
+	// it; a storage-only parent keeps its persisted status so durable reporting
+	// still works while no local tmux handle is attached.
+	if parent.tmuxSession != nil && parent.tmuxSession.Exists() {
+		_ = parent.UpdateStatus()
+	}
 	if !isLiveSessionStatus(parent.Status) {
 		return nil
 	}
