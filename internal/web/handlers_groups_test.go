@@ -150,7 +150,7 @@ func TestGroupDeleteDefaultGroupReturns400(t *testing.T) {
 	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
 	srv.mutator = &fakeMutator{}
 
-	req := newLocalRequest(http.MethodDelete, "/api/groups/my-sessions", nil)
+	req := newLocalRequest(http.MethodDelete, "/api/groups/sessions", nil)
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
 

@@ -34,7 +34,7 @@
   -idle-timeout string
     	Auto-stop session after this duration of no tmux output (Go duration: 30m, 1h, 24h). 0 or unset = disabled
   -inherit-group
-    	Place the child in the parent session's group instead of the cwd-derived group (auto-applied for git worktree children; use this to force it for non-worktree paths)
+    	Deprecated compatibility flag; children already inherit their parent group unless --group is supplied
   -inherit-telegram-env
     	Keep TELEGRAM_* env vars in the child (#1133); off by default to prevent duplicate plugin pollers
   -json
@@ -70,7 +70,7 @@
   -p string
     	Parent session (short)
   -parent string
-    	Parent session (creates sub-session; group is cwd-derived by default — auto-inherits the parent's group for git worktree children or with --inherit-group)
+    	Parent session (creates a child in the parent's group unless --group is supplied)
   -plugin value
     	Catalog plugin to enable for this session (can specify multiple times); requires -c claude
   -q	Minimal output (short)

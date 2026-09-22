@@ -9,7 +9,7 @@ What agent-deck does, at the noun level (independent of which surface — CLI / 
 | **Manage sessions** | Create, start, stop, restart, fork, send, output, remove a session | CLI ✅ · TUI ✅ · Web UI 🟡 |
 | **Sub-agent / worker spawning** | `agent-deck launch` a child Claude session with parent linkage and inherited `--add-dir` | CLI ✅ · TUI ⚪ |
 | **Manage conductors** | Set up long-lived orchestrators with their own profile + channel + heartbeat | CLI ✅ · TUI 🟡 |
-| **Manage groups** | Move / delete groups; organize sessions hierarchically | CLI ✅ · TUI ✅ |
+| **Manage groups** | Organize sidebar entries; groups do not establish session hierarchy | CLI ✅ · TUI ✅ |
 | **Manage watchers** | Install / configure event-driven adapters (Gmail, GitHub, ntfy) — doorbell-not-messenger | CLI ✅ · TUI ✅ |
 | **Heartbeat orchestration** | Cron / ScheduleWakeup feeding the conductor periodic system-state nudges | CLI ✅ |
 | **Dead-letter triage** | `inbox dead-letter` list/show/retry/purge; `Alt+D` in the TUI | CLI + TUI ✅ |
@@ -50,6 +50,6 @@ The table above is what *agent-deck* does. This one is what the *CLI inside a se
 
 **Choosing the `-c` tool for a child:** default to **claude** when its Agent and Workflow tools fit the task. Reach for **codex** for a fast non-interactive second opinion, code review (`codex review`), sandboxed exec, or native in-process helpers when exposed by that runtime; use Agent Deck when work needs a separately managed visible session. Reach for **gemini** for a third opinion or large-context reads.
 
-**agent-deck powers every child also has** (independent of CLI): `agent-deck mcp attach/detach` then `session restart`; `launch` further child or peer sessions (`-no-parent` for peers); load pool skills on demand; `session send` to talk to sibling sessions. See [Sub-Agent Launch](sub-agents.md#sub-agent-launch), [Peer (Root) Sessions vs Sub-Agents](sub-agents.md#peer-root-sessions-vs-sub-agents), [MCP rules](../SKILL.md#rules).
+**agent-deck powers every child also has** (independent of CLI): `agent-deck mcp attach/detach` then `session restart`; `launch` independent roots or explicit children; load pool skills on demand; `session send` to talk to sibling sessions. See [Sub-Agent Launch](sub-agents.md#sub-agent-launch), [Peer (Root) Sessions vs Sub-Agents](sub-agents.md#peer-root-sessions-vs-sub-agents), [MCP rules](../SKILL.md#rules).
 
 **When to go inline vs Agent tool vs Workflow** (for claude children) is owned by the shared conductor template's *Delegation* section (`~/.agent-deck/conductor/conductor-claude.md`) and is not duplicated here: 1 task = inline; a few independent subtasks = Agent tool; a sweep / audit / matrix = Workflow — and always adversarially verify findings with a second agent told to refute.

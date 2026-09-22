@@ -29,6 +29,8 @@
   -q	Minimal output (short)
   -quiet
     	Minimal output
+  -session-id value
+    	Only consider this exact session ID (repeatable)
   -spacing duration
     	Gap between consecutive boots (0 disables spacing — not recommended) (default 5s)
   -verify-poll duration
