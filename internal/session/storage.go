@@ -1516,19 +1516,34 @@ func (s *Storage) GetFileMtime() (time.Time, error) {
 func (s *Storage) convertToInstances(data *StorageData) ([]*Instance, []*GroupData, error) {
 
 	// ═══════════════════════════════════════════════════════════════════
-	// MIGRATION: Convert historic default-group paths to `sessions`.
-	// Old versions used DefaultGroupName ("My Sessions") as both name AND path.
-	// This caused the group to be undeletable since path matched the protection check.
-	// Now we use DefaultGroupPath ("my-sessions") for paths, keeping name as display.
+	// MIGRATION: Convert historic default-group paths to one `sessions` group.
+	// A canonical imported group keeps its settings when both representations
+	// appear in the same payload.
 	// ═══════════════════════════════════════════════════════════════════
 	migratedGroups := false
-	for i, g := range data.Groups {
-		if isLegacyDefaultGroupPath(g.Path) {
-			data.Groups[i].Path = DefaultGroupPath
+	var canonical, legacy *GroupData
+	groups := make([]*GroupData, 0, len(data.Groups))
+	for _, g := range data.Groups {
+		switch {
+		case g.Path == DefaultGroupPath:
+			canonical = g
+		case isLegacyDefaultGroupPath(g.Path):
+			if legacy == nil {
+				legacy = g
+			}
 			migratedGroups = true
-			storageLog.Info("group_path_migrated", slog.String("old_path", g.Path), slog.String("new_path", DefaultGroupPath))
+		default:
+			groups = append(groups, g)
 		}
 	}
+	if canonical != nil {
+		groups = append(groups, canonical)
+	} else if legacy != nil {
+		legacy.Path = DefaultGroupPath
+		legacy.Name = DefaultGroupName
+		groups = append(groups, legacy)
+	}
+	data.Groups = groups
 	for i, inst := range data.Instances {
 		if isLegacyDefaultGroupPath(inst.GroupPath) {
 			data.Instances[i].GroupPath = DefaultGroupPath

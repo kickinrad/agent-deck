@@ -69,7 +69,7 @@ func (s *Server) handleSessionsCollection(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if strings.TrimSpace(req.GroupPath) == "" {
-			req.GroupPath = session.GetDefaultGroup()
+			req.GroupPath = session.DefaultGroupPath
 		}
 		if s.mutator == nil {
 			writeAPIError(w, http.StatusServiceUnavailable, ErrCodeNotImplemented, "mutations not available")

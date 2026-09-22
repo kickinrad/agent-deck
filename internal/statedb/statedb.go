@@ -414,7 +414,7 @@ func (s *StateDB) Migrate() error {
 			id              TEXT PRIMARY KEY,
 			title           TEXT NOT NULL,
 			project_path    TEXT NOT NULL,
-			group_path      TEXT NOT NULL DEFAULT 'my-sessions',
+			group_path      TEXT NOT NULL DEFAULT 'sessions',
 			sort_order      INTEGER NOT NULL DEFAULT 0,
 			command         TEXT NOT NULL DEFAULT '',
 			wrapper         TEXT NOT NULL DEFAULT '',

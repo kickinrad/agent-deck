@@ -11525,7 +11525,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Independent roots start in the configured default group regardless of
 		// cursor or scoped view. Group and parent remain separate explicit dialog
 		// choices, so browsing a persona cannot silently create its child.
-		groupPath := session.GetDefaultGroup()
+		groupPath := session.DefaultGroupPath
 		groupName := groupPath
 		if group, exists := h.groupTree.Groups[groupPath]; exists {
 			groupName = group.Name

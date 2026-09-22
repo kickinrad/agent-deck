@@ -60,10 +60,6 @@ type UserConfig struct {
 	// when no explicit path or group default_path is provided.
 	DefaultPath string `toml:"default_path,omitempty"`
 
-	// DefaultGroup is the group selected for a newly created independent root.
-	// An explicit dialog/CLI group still wins; empty preserves the built-in group.
-	DefaultGroup string `toml:"default_group,omitempty"`
-
 	// Hotkeys overrides default keyboard shortcuts in the TUI.
 	// Keys are action names, values are key bindings (e.g., "delete" = "backspace").
 	// Set an action to "" to explicitly unbind it.
@@ -3974,16 +3970,6 @@ func GetDefaultTool() string {
 		return ""
 	}
 	return config.DefaultTool
-}
-
-// GetDefaultGroup returns the configured home for independent new sessions.
-// It does not create or migrate groups; callers retain an explicit choice.
-func GetDefaultGroup() string {
-	config, err := LoadUserConfig()
-	if err != nil || config == nil || strings.TrimSpace(config.DefaultGroup) == "" {
-		return DefaultGroupPath
-	}
-	return strings.TrimSpace(config.DefaultGroup)
 }
 
 // GetWebMutationsEnabled returns whether `agent-deck web` should accept
