@@ -13,15 +13,39 @@ func (i *Instance) ValidCodexConversationCandidate(sessionID string) bool {
 	if sessionID == "" || strings.ContainsAny(sessionID, `/\\*?[]`) {
 		return false
 	}
-	meta := readCodexRolloutThreadMeta(codexRolloutPathInHome(sessionID, i.getCodexHomeDir()))
+	meta := readCodexRolloutThreadMeta(codexRolloutPathInHome(sessionID, i.codexConversationHome()))
 	return meta.ID == sessionID && meta.Cwd != "" &&
 		normalizePath(meta.Cwd) == normalizePath(i.EffectiveWorkingDir()) &&
 		meta.UserSession
 }
 
+// A multi-profile consumer must not use its own profile or ambient CODEX_HOME
+// for a row loaded from another profile. Command and account choices remain
+// more specific than the owning profile, just as in the launch resolver.
+func (i *Instance) codexConversationHome() string {
+	if i.storageSnapshot == nil || i.storageSnapshot.profile == "" || i.storageSnapshot.profile == resolvedProcessProfile() {
+		return i.getCodexHomeDir()
+	}
+	if home := codexHomeFromCommand(i.resolveCodexCommand(i.Command)); home != "" {
+		return home
+	}
+	if home := i.accountCodexHomeDir(); home != "" {
+		return home
+	}
+	if cfg, err := LoadUserConfig(); err == nil && cfg != nil {
+		if home := cfg.GetProfileCodexConfigDir(i.storageSnapshot.profile); home != "" {
+			return home
+		}
+	}
+	return i.getCodexHomeDir()
+}
+
 // validCodexHook checks the payload (or legacy anchor) before any status,
 // activity, acknowledgement, generation, or binding mutation.
 func (i *Instance) validCodexHook(status *HookStatus) bool {
+	if i == nil || status == nil {
+		return false
+	}
 	if !IsCodexCompatible(i.Tool) {
 		return true
 	}

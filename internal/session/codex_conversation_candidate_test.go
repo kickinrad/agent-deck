@@ -184,3 +184,42 @@ func TestCodexInvalidHookDoesNotEmitDaemonCompletion(t *testing.T) {
 		t.Fatalf("invalid hook changed binding: %q", got)
 	}
 }
+
+func TestCodexValidationUsesOwningProfileWithoutAccount(t *testing.T) {
+	setupSessionXDGPathEnv(t)
+	ClearUserConfigCache()
+	t.Cleanup(ClearUserConfigCache)
+	const ownerProfile = "_test_codex_profile_home"
+	ownerHome := t.TempDir()
+	t.Setenv("AGENTDECK_PROFILE", "_test_daemon_other_profile")
+	t.Setenv("CODEX_HOME", t.TempDir())
+	if err := SaveUserConfig(&UserConfig{Profiles: map[string]ProfileSettings{
+		ownerProfile: {Codex: ProfileCodexSettings{ConfigDir: ownerHome}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := NewStorageWithProfile(ownerProfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	inst := &Instance{ID: "profile-home", Tool: "codex", Command: "codex", ProjectPath: t.TempDir(), CodexSessionID: "old", Status: StatusRunning, CreatedAt: time.Now()}
+	if err := storage.Save([]*Instance{inst}); err != nil {
+		t.Fatal(err)
+	}
+	writeCodexCandidate(t, ownerHome, "new", map[string]any{"id": "new", "cwd": inst.ProjectPath, "source": "cli"})
+	writeCodexCandidate(t, os.Getenv("CODEX_HOME"), "foreign", map[string]any{"id": "foreign", "cwd": inst.ProjectPath, "source": "cli"})
+	loaded, err := storage.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst = loaded[0]
+	inst.UpdateHookStatusWithDB(&HookStatus{Status: "waiting", SessionID: "foreign", Event: "agent-turn-complete", UpdatedAt: time.Now()}, storage.GetDB())
+	if inst.CodexSessionID != "old" {
+		t.Fatal("accepted another profile's ambient home")
+	}
+	inst.UpdateHookStatusWithDB(&HookStatus{Status: "waiting", SessionID: "new", Event: "agent-turn-complete", UpdatedAt: time.Now()}, storage.GetDB())
+	if got := readCodexSessionIDFromDB(t, storage.GetDB(), inst.ID); got != "new" {
+		t.Fatalf("owner-profile binding = %q", got)
+	}
+}

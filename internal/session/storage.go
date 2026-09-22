@@ -443,6 +443,7 @@ func (s *Storage) saveWithGroups(instances []*Instance, groupTree *GroupTree) ([
 // handle's most recent load. Keep both representations: after a merge the caller
 // can still hold stale unedited fields, which must not become future edit intent.
 type instanceStorageSnapshot struct {
+	profile  string
 	dbPath   string
 	original *statedb.InstanceRow
 	stored   *statedb.InstanceRow
@@ -450,6 +451,7 @@ type instanceStorageSnapshot struct {
 
 func (s *Storage) rememberInstanceSnapshot(inst *Instance, original, stored *statedb.InstanceRow) {
 	inst.storageSnapshot = &instanceStorageSnapshot{
+		profile:  s.profile,
 		dbPath:   s.dbPath,
 		original: statedb.CloneInstanceRow(original),
 		stored:   statedb.CloneInstanceRow(stored),

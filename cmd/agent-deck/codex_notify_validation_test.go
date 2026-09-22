@@ -176,12 +176,12 @@ func TestCodexNotifyUsesRecordedAccountAndProfile(t *testing.T) {
 func TestCodexNotifyUsesMultiRepoWorkingDirectory(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("AGENTDECK_HOOKS_DIR", filepath.Join(t.TempDir(), "hooks"))
-	storage, inst := seedCodexNotifySession(t, "multi", "old")
+	storage, _ := seedCodexNotifySession(t, "multi", "old")
 	loaded, err := storage.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	inst = loaded[0]
+	inst := loaded[0]
 	inst.MultiRepoEnabled, inst.MultiRepoTempDir = true, t.TempDir()
 	if err := storage.Save([]*session.Instance{inst}); err != nil {
 		t.Fatal(err)

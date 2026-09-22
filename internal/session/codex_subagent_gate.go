@@ -88,8 +88,8 @@ func codexRolloutPathInHome(sessionID, codexHome string) string {
 }
 
 // readCodexRolloutThreadMeta parses the session_meta head line of a rollout.
-// Returns the zero value on any read/parse failure (fail-open: an unreadable
-// head is treated as a user thread).
+// Returns the zero value on any read/parse failure. The strict conversation
+// validator requires UserSession; legacy subagent-only probes use ThreadSource.
 func readCodexRolloutThreadMeta(path string) codexThreadMeta {
 	f, err := os.Open(path)
 	if err != nil {
