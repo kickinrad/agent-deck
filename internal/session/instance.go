@@ -1134,7 +1134,7 @@ func NewInstance(title, projectPath string) *Instance {
 		Account:          strings.TrimSpace(os.Getenv("AGENTDECK_ACCOUNT")),
 		Title:            title,
 		ProjectPath:      projectPath,
-		GroupPath:        extractGroupPath(projectPath), // Auto-assign group from path
+		GroupPath:        DefaultGroupPath,
 		Tool:             "shell",
 		Status:           StatusIdle,
 		CreatedAt:        time.Now(),
@@ -1221,7 +1221,7 @@ func NewInstanceWithTool(title, projectPath, tool string) *Instance {
 		Account:          strings.TrimSpace(os.Getenv("AGENTDECK_ACCOUNT")),
 		Title:            title,
 		ProjectPath:      projectPath,
-		GroupPath:        extractGroupPath(projectPath),
+		GroupPath:        DefaultGroupPath,
 		Tool:             tool,
 		Status:           StatusIdle,
 		CreatedAt:        time.Now(),
@@ -1248,11 +1248,9 @@ func NewInstanceWithGroupAndTool(title, projectPath, groupPath, tool string) *In
 	return inst
 }
 
-// GroupPathForProject is the exported wrapper around extractGroupPath. It
-// gives CLI callers (issue #972) a single source of truth for "what group
-// does this project path imply" — matching what NewInstance assigns by
-// default — so launch/add can prefer cwd-derived groups over inherited
-// parent groups without duplicating the heuristic.
+// GroupPathForProject is retained for callers that explicitly want a project
+// grouping suggestion. New sessions are roots in DefaultGroupPath unless a
+// caller explicitly selects a group or parent.
 func GroupPathForProject(projectPath string) string {
 	return extractGroupPath(projectPath)
 }

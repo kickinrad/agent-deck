@@ -10,10 +10,11 @@ import (
 func legacyGroupReviewFixture(t *testing.T, member bool) (*Storage, []*Instance, *GroupTree) {
 	t.Helper()
 	s := newTestStorage(t)
-	require.NoError(t, s.db.SaveGroups([]*statedb.GroupRow{{Path: DefaultGroupName, Name: DefaultGroupName, Expanded: true, MaxConcurrent: 2}}))
+	require.NoError(t, s.db.SaveGroups([]*statedb.GroupRow{{Path: "my-sessions", Name: "My Sessions", Expanded: true, MaxConcurrent: 2}}))
 	if member {
-		require.NoError(t, s.db.SaveInstance(&statedb.InstanceRow{ID: "legacy", Title: "legacy", Tool: "shell", ProjectPath: t.TempDir(), GroupPath: DefaultGroupName}))
+		require.NoError(t, s.db.SaveInstance(&statedb.InstanceRow{ID: "legacy", Title: "legacy", Tool: "shell", ProjectPath: t.TempDir(), GroupPath: "my-sessions"}))
 	}
+	require.NoError(t, s.db.Migrate())
 	instances, groups, err := s.LoadWithGroups()
 	require.NoError(t, err)
 	return s, instances, NewGroupTreeWithGroups(instances, groups)
@@ -40,10 +41,10 @@ func TestLegacyGroupReviewMigrationCommitsOnce(t *testing.T) {
 
 func TestLegacyGroupReviewMigrationPreservesConcurrentMetadata(t *testing.T) {
 	s, instances, tree := legacyGroupReviewFixture(t, true)
-	_, err := s.db.DB().Exec("UPDATE groups SET max_concurrent = 7 WHERE path = ?", DefaultGroupName)
+	_, err := s.db.DB().Exec("UPDATE groups SET max_concurrent = 7 WHERE path = ?", DefaultGroupPath)
 	require.NoError(t, err)
 	require.NoError(t, s.SaveWithGroups(instances, tree.ShallowCopyForSave()))
-	require.Nil(t, storedGroup(t, s, DefaultGroupName))
+	require.Nil(t, storedGroup(t, s, "my-sessions"))
 	require.Equal(t, 7, storedGroup(t, s, DefaultGroupPath).MaxConcurrent)
 }
 

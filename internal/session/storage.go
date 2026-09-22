@@ -1406,7 +1406,7 @@ func (s *Storage) LoadWithGroupsSnapshot() ([]*Instance, []*GroupData, *statedb.
 				return nil, nil, nil, convertErr
 			}
 			stored := byID[inst.ID]
-			if stored != nil && stored.GroupPath == DefaultGroupName {
+			if stored != nil && isLegacyDefaultGroupPath(stored.GroupPath) {
 				// Known legacy normalization is migration intent, not an incidental
 				// display difference. Commit membership with the group's path move.
 				original.GroupPath = stored.GroupPath
@@ -1417,16 +1417,10 @@ func (s *Storage) LoadWithGroupsSnapshot() ([]*Instance, []*GroupData, *statedb.
 		for _, row := range dbGroups {
 			groupsByPath[row.Path] = row
 		}
-		if legacy := groupsByPath[DefaultGroupName]; legacy != nil {
-			if groupsByPath[DefaultGroupPath] != nil {
-				return nil, nil, nil, fmt.Errorf("legacy default group migration conflicts with existing %q group", DefaultGroupPath)
-			}
-			groupsByPath[DefaultGroupPath] = legacy
-		}
 		for _, group := range groups {
 			stored := groupsByPath[group.Path]
 			original := groupDataToRow(group)
-			if stored != nil && stored.Path == DefaultGroupName {
+			if stored != nil && isLegacyDefaultGroupPath(stored.Path) {
 				original.Path = stored.Path
 			}
 			group.storageSnapshot = &groupStorageSnapshot{dbPath: s.dbPath,
@@ -1522,27 +1516,27 @@ func (s *Storage) GetFileMtime() (time.Time, error) {
 func (s *Storage) convertToInstances(data *StorageData) ([]*Instance, []*GroupData, error) {
 
 	// ═══════════════════════════════════════════════════════════════════
-	// MIGRATION: Convert old "My Sessions" paths to normalized "my-sessions"
+	// MIGRATION: Convert historic default-group paths to `sessions`.
 	// Old versions used DefaultGroupName ("My Sessions") as both name AND path.
 	// This caused the group to be undeletable since path matched the protection check.
 	// Now we use DefaultGroupPath ("my-sessions") for paths, keeping name as display.
 	// ═══════════════════════════════════════════════════════════════════
 	migratedGroups := false
 	for i, g := range data.Groups {
-		if g.Path == DefaultGroupName {
+		if isLegacyDefaultGroupPath(g.Path) {
 			data.Groups[i].Path = DefaultGroupPath
 			migratedGroups = true
-			storageLog.Info("group_path_migrated", slog.String("old_path", DefaultGroupName), slog.String("new_path", DefaultGroupPath))
+			storageLog.Info("group_path_migrated", slog.String("old_path", g.Path), slog.String("new_path", DefaultGroupPath))
 		}
 	}
 	for i, inst := range data.Instances {
-		if inst.GroupPath == DefaultGroupName {
+		if isLegacyDefaultGroupPath(inst.GroupPath) {
 			data.Instances[i].GroupPath = DefaultGroupPath
 			migratedGroups = true
 		}
 	}
 	if migratedGroups {
-		storageLog.Info("default_group_paths_migrated", slog.String("old_name", DefaultGroupName), slog.String("new_path", DefaultGroupPath))
+		storageLog.Info("default_group_paths_migrated", slog.String("new_path", DefaultGroupPath))
 	}
 
 	// Convert to instances
