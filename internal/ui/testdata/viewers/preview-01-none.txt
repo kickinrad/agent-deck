@@ -2,5 +2,5 @@ focused-session  ◐ waiting
 📁 /tmp/focused
 ⏱ just now
 👁️ no viewers
- claude   tmp 
+ claude   sessions 
 ─────────────────────────────────────── Claude ───────────────────────────────────────
