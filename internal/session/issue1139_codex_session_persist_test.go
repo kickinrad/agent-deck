@@ -99,6 +99,7 @@ func TestRebindPersistsCodexSessionIDToDB(t *testing.T) {
 		t.Fatalf("pre-condition: DB codex_session_id = %q, want %q", got, oldID)
 	}
 
+	seedValidCodexCandidate(t, inst, newID)
 	inst.UpdateHookStatus(&HookStatus{
 		Status:    "running",
 		SessionID: newID,
@@ -156,6 +157,7 @@ func TestBindPersistsCodexSessionIDToDB(t *testing.T) {
 		t.Fatalf("SaveInstance seed: %v", err)
 	}
 
+	seedValidCodexCandidate(t, inst, newID)
 	inst.UpdateHookStatus(&HookStatus{
 		Status:    "running",
 		SessionID: newID,
@@ -194,6 +196,7 @@ func TestCodexRebindNoOpWhenStateDBUnset(t *testing.T) {
 	inst := NewInstanceWithTool("hook-codex-rebind-nodb", projectPath, "codex")
 
 	newID := "9f5e1d80-0000-0000-0000-000000000a04"
+	seedValidCodexCandidate(t, inst, newID)
 	inst.UpdateHookStatus(&HookStatus{
 		Status:    "running",
 		SessionID: newID,
@@ -255,6 +258,7 @@ func TestCodexRebindPreservesUnrelatedToolDataKeys(t *testing.T) {
 	}
 
 	inst.CodexSessionID = oldID
+	seedValidCodexCandidate(t, inst, newID)
 	inst.UpdateHookStatus(&HookStatus{
 		Status:    "running",
 		SessionID: newID,

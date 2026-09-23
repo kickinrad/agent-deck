@@ -5962,7 +5962,7 @@ func (i *Instance) UpdateStatus() error {
 	// COLD LOAD: CLI doesn't run StatusFileWatcher, so hookStatus is always empty.
 	// Read the hook file from disk once to give CLI the same fast path as the TUI.
 	if i.hookStatus == "" && (IsClaudeCompatible(i.Tool) || IsCodexCompatible(i.Tool) || i.Tool == "gemini" || i.Tool == "hermes" || i.Tool == "cursor") {
-		if hs := readHookStatusFile(i.ID); hs != nil {
+		if hs := readHookStatusFile(i.ID); hs != nil && i.validCodexHook(hs) {
 			i.hookStatus = hs.Status
 			i.hookEvent = hs.Event
 			i.hookLastUpdate = hs.UpdatedAt
@@ -6443,6 +6443,10 @@ func (i *Instance) UpdateHookStatusWithDB(status *HookStatus, db *statedb.StateD
 	}
 
 	i.mu.Lock()
+	if !i.validCodexHook(status) {
+		i.mu.Unlock()
+		return
+	}
 	// Issue #1846: whatever hookLastUpdate ends up COMMITTED when this call
 	// returns is agent-activity evidence — fold it into the durable record.
 	// The reject branches below restore the pre-event value first, so a
@@ -6616,25 +6620,6 @@ func (i *Instance) UpdateHookStatusWithDB(status *HookStatus, db *statedb.StateD
 		i.bindClaudeSessionFromHook(sessionID, hookSource, status.Event, "rebind", db)
 	case IsCodexCompatible(i.Tool):
 		if sessionID == i.CodexSessionID {
-			return
-		}
-		// Quality gate (incident 2026-07-15): codex subagent threads fire
-		// the same agent-turn-complete notify as the main thread, and a
-		// completing subagent's payload id would otherwise usurp the
-		// binding. Restarting then resumes a finalized child thread, which
-		// refuses turn/start and error-loops the session. See
-		// codex_subagent_gate.go.
-		if i.shouldRejectCodexSubagentRebind(sessionID) {
-			_ = WriteSessionIDLifecycleEvent(SessionIDLifecycleEvent{
-				InstanceID: i.ID, Tool: i.Tool, Action: "reject",
-				Source: hookSource, OldID: i.CodexSessionID, Candidate: sessionID,
-				HookEvent: status.Event, Reason: "candidate_is_subagent_thread",
-			})
-			sessionLog.Debug("codex_session_rebind_rejected_subagent",
-				slog.String("old_id", i.CodexSessionID),
-				slog.String("candidate", sessionID),
-				slog.String("event", status.Event),
-			)
 			return
 		}
 		i.bindCodexSessionFromHook(sessionID, status.Event, db)

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
+	"github.com/asheshgoplani/agent-deck/internal/statedb"
 )
 
 const codexNotifyMarkerBegin = "# BEGIN AGENTDECK CODEX NOTIFY"
@@ -221,6 +222,44 @@ func writeCodexHookStatus(instanceID, status, sessionID, event string, turnIDs .
 	if instanceID == "" || status == "" {
 		return
 	}
+	sessionID = strings.TrimSpace(sessionID)
+	evidenceSessionID := sessionID
+	if evidenceSessionID == "" {
+		evidenceSessionID = session.ReadHookSessionAnchor(instanceID)
+	}
+	// Notify inherits the owning profile, not the TUI's global DB. Resolve the
+	// recorded account/command/project read-only before touching any hook state.
+	profile, err := session.ResolveProfileForStorage("")
+	if err != nil {
+		return
+	}
+	dbPath, err := session.GetDBPathForProfile(profile)
+	if err != nil {
+		return
+	}
+	db, err := statedb.OpenReadOnlyLive(dbPath)
+	if err != nil {
+		return
+	}
+	row, err := db.LoadInstanceByID(instanceID)
+	_ = db.Close()
+	if err != nil || row == nil {
+		return
+	}
+	inst := &session.Instance{Tool: row.Tool, Command: row.Command, Account: row.Account, ProjectPath: row.ProjectPath}
+	// tool_data timestamps use the database's Unix representation, unlike
+	// InstanceData's JSON-export time.Time fields. Decode only launch metadata.
+	var data struct {
+		MultiRepoEnabled bool   `json:"multi_repo_enabled"`
+		MultiRepoTempDir string `json:"multi_repo_temp_dir"`
+	}
+	if len(row.ToolData) > 0 && json.Unmarshal(row.ToolData, &data) != nil {
+		return
+	}
+	inst.MultiRepoEnabled, inst.MultiRepoTempDir = data.MultiRepoEnabled, data.MultiRepoTempDir
+	if !inst.ValidCodexConversationCandidate(evidenceSessionID) {
+		return
+	}
 	hooksDir := getHooksDir()
 	if err := os.MkdirAll(hooksDir, 0700); err != nil {
 		return
@@ -252,13 +291,8 @@ func writeCodexHookStatus(instanceID, status, sessionID, event string, turnIDs .
 	if data, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(data, &prior)
 	}
-	sessionID = strings.TrimSpace(sessionID)
 	if sessionID != "" {
 		session.WriteHookSessionAnchor(instanceID, sessionID)
-	}
-	evidenceSessionID := sessionID
-	if evidenceSessionID == "" {
-		evidenceSessionID = session.ReadHookSessionAnchor(instanceID)
 	}
 	started, completed := codexTurnEdge(event)
 	turnID := ""

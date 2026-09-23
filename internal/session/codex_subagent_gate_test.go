@@ -26,8 +26,9 @@ func seedCodexRolloutWithMeta(t *testing.T, codexHome, sid, threadSource, parent
 	}
 
 	payload := map[string]any{
-		"id":  sid,
-		"cwd": "/tmp/project",
+		"source": "cli",
+		"id":     sid,
+		"cwd":    filepath.Join(filepath.Dir(codexHome), "project"),
 	}
 	if threadSource != "" {
 		payload["thread_source"] = threadSource
@@ -163,7 +164,7 @@ func TestCodexHookRebind_AllowsUserThread(t *testing.T) {
 	}
 }
 
-func TestCodexHookRebind_AllowsUnflushedCandidate(t *testing.T) {
+func TestCodexHookRebind_DefersUnflushedCandidate(t *testing.T) {
 	inst, codexHome := newCodexGateInstance(t)
 
 	oldSID := uniqueSID(t)
@@ -178,9 +179,13 @@ func TestCodexHookRebind_AllowsUnflushedCandidate(t *testing.T) {
 		UpdatedAt: time.Now(),
 	})
 
+	if inst.CodexSessionID != oldSID {
+		t.Fatalf("unflushed candidate changed binding to %q", inst.CodexSessionID)
+	}
+	seedCodexRolloutWithMeta(t, codexHome, newSID, "user", "", false)
+	inst.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: newSID, Event: "agent-turn-complete", UpdatedAt: time.Now()})
 	if inst.CodexSessionID != newSID {
-		t.Fatalf("candidate without a flushed rollout must bind (fail-open, "+
-			"pre-gate behavior): got %q, want %q", inst.CodexSessionID, newSID)
+		t.Fatalf("later flushed candidate did not bind: %q", inst.CodexSessionID)
 	}
 }
 

@@ -245,7 +245,8 @@ func observeCrossHarnessEvidence(now time.Time, target *Instance, expected Fresh
 				return CrossHarnessTargetEvidence{}, false
 			}
 		}
-		if canonicalSwitchHarness(expected.Tool) == "codex" && !codexReadinessEvent(status.Event) {
+		if canonicalSwitchHarness(expected.Tool) == "codex" &&
+			(!codexReadinessEvent(status.Event) || !target.ValidCodexConversationCandidate(sessionID)) {
 			return CrossHarnessTargetEvidence{}, false
 		}
 		return CrossHarnessTargetEvidence{InstanceID: target.ID, Tool: canonicalSwitchHarness(expected.Tool), SessionID: sessionID, Ready: true, Evidence: map[bool]string{true: "claude-native-hook", false: "codex-native-notify"}[canonicalSwitchHarness(expected.Tool) == "claude"]}, true

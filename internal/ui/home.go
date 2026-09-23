@@ -20052,7 +20052,7 @@ func (h *Home) renderSessionItem(
 			tsStyle = SessionStatusSelStyle
 		}
 		var hookStatus *session.HookStatus
-		if h.hookWatcher != nil {
+		if h.hookWatcher != nil && !session.IsCodexCompatible(inst.Tool) {
 			hookStatus = h.hookWatcher.GetHookStatus(inst.ID)
 		}
 		confirmedTs, confirmedObserved := inst.LastObservedActivity()
@@ -21080,7 +21080,7 @@ func (h *Home) renderPreviewPane(width, height int) string {
 	// pickBadgeTime, so the two surfaces showed different ages for the same
 	// session; both were stale once the underlying evidence was destroyed).
 	var previewHookStatus *session.HookStatus
-	if h.hookWatcher != nil {
+	if h.hookWatcher != nil && !session.IsCodexCompatible(selected.Tool) {
 		previewHookStatus = h.hookWatcher.GetHookStatus(selected.ID)
 	}
 	confirmedTs, confirmedObserved := selected.LastObservedActivity()

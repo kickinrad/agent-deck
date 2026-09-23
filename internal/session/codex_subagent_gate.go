@@ -54,6 +54,9 @@ import (
 // codexThreadMeta is the subset of a rollout's session_meta payload the
 // gate/safety-net decisions need.
 type codexThreadMeta struct {
+	ID             string
+	Cwd            string
+	UserSession    bool
 	ThreadSource   string
 	ParentThreadID string
 }
@@ -85,8 +88,8 @@ func codexRolloutPathInHome(sessionID, codexHome string) string {
 }
 
 // readCodexRolloutThreadMeta parses the session_meta head line of a rollout.
-// Returns the zero value on any read/parse failure (fail-open: an unreadable
-// head is treated as a user thread).
+// Returns the zero value on any read/parse failure. The strict conversation
+// validator requires UserSession; legacy subagent-only probes use ThreadSource.
 func readCodexRolloutThreadMeta(path string) codexThreadMeta {
 	f, err := os.Open(path)
 	if err != nil {
@@ -105,6 +108,9 @@ func readCodexRolloutThreadMeta(path string) codexThreadMeta {
 	var head struct {
 		Type    string `json:"type"`
 		Payload struct {
+			ID             string          `json:"id"`
+			Cwd            string          `json:"cwd"`
+			Ephemeral      bool            `json:"ephemeral"`
 			ThreadSource   string          `json:"thread_source"`
 			ParentThreadID string          `json:"parent_thread_id"`
 			Source         json.RawMessage `json:"source"`
@@ -115,9 +121,21 @@ func readCodexRolloutThreadMeta(path string) codexThreadMeta {
 	}
 
 	meta := codexThreadMeta{
+		ID:             head.Payload.ID,
+		Cwd:            head.Payload.Cwd,
 		ThreadSource:   head.Payload.ThreadSource,
 		ParentThreadID: head.Payload.ParentThreadID,
 	}
+	// Older native user rollouts omit thread_source and identify their origin
+	// with source="cli" (or "vscode"/"exec"). Object-valued sources describe
+	// subagents and must never qualify, even with conflicting thread_source.
+	var source string
+	sourceOK := len(head.Payload.Source) == 0
+	if json.Unmarshal(head.Payload.Source, &source) == nil {
+		sourceOK = source == "cli" || source == "vscode" || source == "exec"
+	}
+	meta.UserSession = !head.Payload.Ephemeral && meta.ParentThreadID == "" && sourceOK &&
+		(meta.ThreadSource == "user" || ((meta.ThreadSource == "" || meta.ThreadSource == "cli") && source != ""))
 	// Older payloads carry parenthood only inside source.subagent.thread_spawn.
 	if meta.ParentThreadID == "" && len(head.Payload.Source) > 0 {
 		var src struct {
