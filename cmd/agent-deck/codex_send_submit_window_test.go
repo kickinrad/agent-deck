@@ -44,3 +44,54 @@ func TestCodexSend_ArrivedButNeverStarted_StillTypedWithinBudget(t *testing.T) {
 		t.Fatalf("want typed failure, got %q (err=%v)", delivery, err)
 	}
 }
+
+// A Codex turn can start and finish between status polls, so pane-based
+// status never shows it active (observed live on .6). The notify hook's turn
+// marker changing across the send is the submission evidence.
+func TestCodexSend_HookTurnMarkerChange_IsSubmitted(t *testing.T) {
+	const msg = "Do not use tools. Reply with exactly PROBE-6003."
+	calls := 0
+	mock := &mockSendRetryTarget{
+		statuses: []string{"waiting"},
+		panes:    []string{"› \n", "› " + msg + "\n"},
+	}
+
+	delivery, err := sendWithRetryTarget(mock, msg, true, sendRetryOptions{
+		maxRetries: 50, checkDelay: 0, tool: "codex",
+		turnMarker: func() string {
+			calls++
+			if calls <= 3 {
+				return "turn-a|turn-a"
+			}
+			return "turn-b|turn-b"
+		},
+	})
+	if err != nil || delivery != deliverySubmitted {
+		t.Fatalf("want submitted, got %q (err=%v)", delivery, err)
+	}
+}
+
+// A marker change while the agent was already busy is not attributable to
+// this send.
+func TestCodexSend_HookTurnMarkerChangeWhileBusy_IsNotSubmission(t *testing.T) {
+	const msg = "Do not use tools. Reply with exactly PROBE-6003."
+	calls := 0
+	mock := &mockSendRetryTarget{
+		statuses: []string{"active"},
+		panes:    []string{"› \n", "› " + msg + "\n"},
+	}
+
+	delivery, _ := sendWithRetryTarget(mock, msg, true, sendRetryOptions{
+		maxRetries: 20, checkDelay: 0, tool: "codex",
+		turnMarker: func() string {
+			calls++
+			if calls == 1 {
+				return "turn-a|turn-a"
+			}
+			return "turn-b|turn-b"
+		},
+	})
+	if delivery == deliverySubmitted {
+		t.Fatal("a turn change on an already-busy agent must not certify this send")
+	}
+}

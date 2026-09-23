@@ -2984,6 +2984,9 @@ func handleSessionSend(profile string, args []string) {
 	if *noWait {
 		tun = noWaitSendTuning()
 	}
+	if session.IsCodexCompatible(inst.Tool) {
+		tun.retry.turnMarker = func() string { return session.CodexTurnMarker(inst.ID) }
+	}
 	sendRes, sendErr := executeSend(tmuxSess, inst.Tool, message, *noWait, tun)
 	if sendErr != nil {
 		extra := sendRes.jsonFields()
@@ -3478,6 +3481,11 @@ type sendRetryOptions struct {
 	// composer paste marker counts as foreign content and no nudge fires —
 	// the fail-safe default for callers that cannot establish provenance.
 	composerPasteFreeBeforeSend bool
+
+	// turnMarker, when set, reports the tool's latest hook-recorded turn. A
+	// change across the send is submission evidence for turns too brief for
+	// pane-based status to ever show as active (Codex).
+	turnMarker func() string
 }
 
 // composerPasteFree captures the pane and reports whether the composer is
@@ -3520,6 +3528,9 @@ func sendWithRetryTarget(target sendRetryTarget, message string, skipVerify bool
 	var arrivalBaseline sendArrivalBaseline
 	if skipVerify {
 		arrivalBaseline = captureArrivalBaseline(target, message)
+		if opts.turnMarker != nil {
+			arrivalBaseline.turn = opts.turnMarker()
+		}
 	}
 
 	if err := target.SendKeysAndEnter(message); err != nil {
@@ -3767,6 +3778,9 @@ type sendArrivalBaseline struct {
 	// a failed read defaulting to "was not active" would turn a
 	// continuously-busy agent into a fake not-active-to-active transition.
 	statusOK bool
+	// turn is the hook-recorded turn marker before the send (see
+	// sendRetryOptions.turnMarker).
+	turn string
 }
 
 // captureArrivalBaseline snapshots the pane and status before a send. Each
@@ -3864,6 +3878,11 @@ func verifyContentArrival(target sendRetryTarget, message string, opts sendRetry
 	for i := 0; i < checks || (sawBody && i < submitChecks); i++ {
 		// Strongest signal first: an idle agent that starts working received
 		// what it started working on, which is submission, not just arrival.
+		if baseline.statusOK && !baseline.wasActive && opts.turnMarker != nil {
+			if turn := opts.turnMarker(); turn != "" && turn != baseline.turn {
+				return deliverySubmitted, nil
+			}
+		}
 		if baseline.statusOK && !baseline.wasActive {
 			if status, err := target.GetStatus(); err == nil && status == "active" {
 				return deliverySubmitted, nil
