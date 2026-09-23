@@ -247,7 +247,12 @@ func writeCodexHookStatus(instanceID, status, sessionID, event string, turnIDs .
 		return
 	}
 	inst := &session.Instance{Tool: row.Tool, Command: row.Command, Account: row.Account, ProjectPath: row.ProjectPath}
-	var data session.InstanceData
+	// tool_data timestamps use the database's Unix representation, unlike
+	// InstanceData's JSON-export time.Time fields. Decode only launch metadata.
+	var data struct {
+		MultiRepoEnabled bool   `json:"multi_repo_enabled"`
+		MultiRepoTempDir string `json:"multi_repo_temp_dir"`
+	}
 	if len(row.ToolData) > 0 && json.Unmarshal(row.ToolData, &data) != nil {
 		return
 	}

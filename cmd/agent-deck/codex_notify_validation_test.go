@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
-	"github.com/asheshgoplani/agent-deck/internal/statedb"
 )
 
 func seedCodexNotifySession(t *testing.T, instanceID, sessionID string) (*session.Storage, *session.Instance) {
@@ -26,9 +25,9 @@ func seedCodexNotifySession(t *testing.T, instanceID, sessionID string) (*sessio
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = storage.Close() })
-	inst := &session.Instance{ID: instanceID, Title: "notify", ProjectPath: home, Tool: "codex", Command: "codex", Status: session.StatusRunning, CreatedAt: time.Now()}
-	row := &statedb.InstanceRow{ID: inst.ID, Title: inst.Title, ProjectPath: inst.ProjectPath, Tool: inst.Tool, Command: inst.Command, Status: "running", CreatedAt: inst.CreatedAt}
-	if err := storage.GetDB().SaveInstance(row); err != nil {
+	inst := &session.Instance{ID: instanceID, Title: "notify", ProjectPath: home, Tool: "codex", Command: "codex", Status: session.StatusRunning, CreatedAt: time.Now(), CodexSessionID: sessionID, CodexDetectedAt: time.Now()}
+	// Persist through the real storage encoder, including Unix timestamps.
+	if err := storage.Save([]*session.Instance{inst}); err != nil {
 		t.Fatal(err)
 	}
 	writeNotifyRollout(t, os.Getenv("CODEX_HOME"), sessionID, map[string]any{"id": sessionID, "cwd": inst.ProjectPath, "thread_source": "user", "source": "cli"})
@@ -182,6 +181,7 @@ func TestCodexNotifyUsesMultiRepoWorkingDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	inst := loaded[0]
+	inst.CodexSessionID, inst.CodexDetectedAt = "old", time.Now()
 	inst.MultiRepoEnabled, inst.MultiRepoTempDir = true, t.TempDir()
 	if err := storage.Save([]*session.Instance{inst}); err != nil {
 		t.Fatal(err)
