@@ -1043,6 +1043,17 @@ func hookStatusFilePath(instanceID string) string {
 	return filepath.Join(hooksDir, instanceID+".json")
 }
 
+// CodexTurnMarker identifies the latest Codex turn the notify hook reported
+// for instanceID, or "" when none is recorded. It changes whenever a new turn
+// starts or completes, so a change across a send proves the agent took one up.
+func CodexTurnMarker(instanceID string) string {
+	status := readHookStatusFile(instanceID)
+	if status == nil || (status.CodexStartedGeneration == "" && status.CodexCompletedGeneration == "") {
+		return ""
+	}
+	return status.CodexStartedGeneration + "|" + status.CodexCompletedGeneration
+}
+
 func readHookStatusFile(instanceID string) *HookStatus {
 	if strings.TrimSpace(instanceID) == "" {
 		return nil
