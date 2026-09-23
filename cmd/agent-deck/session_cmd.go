@@ -3851,8 +3851,17 @@ func verifyContentArrival(target sendRetryTarget, message string, opts sendRetry
 		checks = 1
 	}
 
+	// Arrival only has to cover a redraw, but once the body is in, the turn
+	// start is what upgrades it to submitted — and a Codex turn surfaces to
+	// pane-based status seconds later, not within a redraw. Keep watching for
+	// it across the caller's full send budget before calling it typed.
+	submitChecks := opts.maxRetries
+	if submitChecks < checks {
+		submitChecks = checks
+	}
+
 	sawBody := false
-	for i := 0; i < checks; i++ {
+	for i := 0; i < checks || (sawBody && i < submitChecks); i++ {
 		// Strongest signal first: an idle agent that starts working received
 		// what it started working on, which is submission, not just arrival.
 		if baseline.statusOK && !baseline.wasActive {
@@ -3891,7 +3900,7 @@ func verifyContentArrival(target sendRetryTarget, message string, opts sendRetry
 				}
 			}
 		}
-		if i < checks-1 {
+		if i < checks-1 || (sawBody && i < submitChecks-1) {
 			time.Sleep(opts.checkDelay)
 		}
 	}
