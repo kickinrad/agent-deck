@@ -196,13 +196,14 @@ func TestCodexExclusionBootstrapCannotClaimSameRollout(t *testing.T) {
 	t.Setenv("CODEX_HOME", t.TempDir())
 	sid := uniqueSID(t)
 	seedCodexRolloutWithMeta(t, os.Getenv("CODEX_HOME"), sid, "", "", false)
+	project := filepath.Join(filepath.Dir(os.Getenv("CODEX_HOME")), "project")
 	var wg sync.WaitGroup
 	results := make(chan string, 2)
 	for j := 0; j < 2; j++ {
 		wg.Add(1)
 		go func(j int) {
 			defer wg.Done()
-			inst := &Instance{Tool: "codex", ProjectPath: "/tmp/project", tmuxSession: &tmux.Session{Name: fmt.Sprintf("agentdeck_scan_%d", j)}}
+			inst := &Instance{Tool: "codex", ProjectPath: project, tmuxSession: &tmux.Session{Name: fmt.Sprintf("agentdeck_scan_%d", j)}}
 			results <- inst.resolveCodexDetectionCandidate("", nil)
 		}(j)
 	}

@@ -6294,7 +6294,7 @@ func (i *Instance) updateStatus(pass *StatusUpdatePass, syncMetadata bool) error
 	// COLD LOAD: CLI doesn't run StatusFileWatcher, so hookStatus is always empty.
 	// Read the hook file from disk once to give CLI the same fast path as the TUI.
 	if i.hookStatus == "" && HookStatusTool(i.Tool) {
-		if hs := readHookStatusFile(i.ID); hs != nil {
+		if hs := readHookStatusFile(i.ID); hs != nil && i.validCodexHook(hs) {
 			i.hookStatus = hs.Status
 			i.hookEvent = hs.Event
 			i.hookLastUpdate = hs.UpdatedAt
@@ -6814,6 +6814,10 @@ func (i *Instance) UpdateHookStatusWithDB(status *HookStatus, db *statedb.StateD
 	}
 
 	i.mu.Lock()
+	if !i.validCodexHook(status) {
+		i.mu.Unlock()
+		return
+	}
 	// Issue #1846: whatever hookLastUpdate ends up COMMITTED when this call
 	// returns is agent-activity evidence — fold it into the durable record.
 	// The reject branches below restore the pre-event value first, so a
