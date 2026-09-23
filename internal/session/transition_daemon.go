@@ -448,7 +448,7 @@ func (d *TransitionDaemon) syncProfile(profile string) time.Duration {
 	for _, inst := range instances {
 		byID[inst.ID] = inst
 		if HookStatusTool(inst.Tool) {
-			if hs := d.hookStatusForInstance(inst.ID); hs != nil {
+			if hs := d.hookStatusForInstance(inst.ID); hs != nil && inst.validCodexHook(hs) {
 				// Issue #1349: only let a hook status rebind the session id when
 				// the instance is actually LIVE (running/waiting/idle with a real
 				// tmux session). A stopped/removed session keeps a stale

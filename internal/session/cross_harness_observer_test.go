@@ -25,6 +25,10 @@ func TestNativeCrossHarnessObserver_CorrelatesClaudeCodexAndPiEvidence(t *testin
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			target := &Instance{ID: "target-" + tc.harness, Tool: tc.harness, LastStartedAt: now}
+			if tc.harness == "codex" {
+				target.ProjectPath = t.TempDir()
+				seedValidCodexCandidate(t, target, tc.session)
+			}
 			expected := FreshTargetIdentity{InstanceID: target.ID, Tool: tc.harness, SessionID: tc.session}
 			reader := CrossHarnessTargetEvidenceReader{
 				ProcessAlive: func(*Instance) (bool, error) { return true, nil },
