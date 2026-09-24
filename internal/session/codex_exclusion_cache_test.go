@@ -255,7 +255,7 @@ func TestCodexExclusionAuthoritativeBindingAfterSnapshot(t *testing.T) {
 			b.codexExclusions(&pass)
 			sid := uniqueSID(t)
 			if source == "hook" {
-				a.bindCodexSessionFromHook(sid, "agent-turn-complete")
+				a.bindCodexSessionFromHook(sid, "agent-turn-complete", nil)
 			} else if got := a.resolveCodexDetectionCandidate(sid, nil); got != sid {
 				t.Fatalf("probe candidate=%q", got)
 			}
