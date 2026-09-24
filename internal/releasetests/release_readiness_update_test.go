@@ -55,7 +55,7 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/update"
 )
 
-const readinessRepo = "asheshgoplani/agent-deck"
+const readinessRepo = update.GitHubRepo
 
 func TestReleaseReadiness_UpdatePath(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
