@@ -3297,6 +3297,9 @@ func handleSessionSend(profile string, args []string) {
 	tun.retry.targetBusyByHook = func() (bool, bool) {
 		return hookDrivenBusy(inst)
 	}
+	if session.IsCodexCompatible(inst.Tool) {
+		tun.retry.turnMarker = func() string { return session.CodexTurnMarker(inst.ID) }
+	}
 	// #1978: turn advancement in Claude's own transcript is the authoritative
 	// submission signal; it is only available when the transcript existed
 	// before the send (position is the proof).
@@ -4742,6 +4745,11 @@ type sendRetryOptions struct {
 	// and wins over every heuristic below. nil for callers without a
 	// transcript (non-Claude tools, slash commands, unknown path).
 	turnAdvanced func() bool
+
+	// turnMarker, when set, reports the tool's latest hook-recorded turn. A
+	// change across the send is submission evidence for turns too brief for
+	// pane-based status to ever show as active (Codex).
+	turnMarker func() string
 }
 
 // verificationChecks is how many post-send checks the verify loop runs for
@@ -4834,6 +4842,9 @@ func sendWithRetryTarget(target sendRetryTarget, message string, skipVerify bool
 	var arrivalBaseline sendArrivalBaseline
 	if skipVerify || opts.targetBusyByHook != nil {
 		arrivalBaseline = captureArrivalBaseline(target, message)
+		if opts.turnMarker != nil {
+			arrivalBaseline.turn = opts.turnMarker()
+		}
 	}
 	// hookBusyBeforeSend distinguishes the two ways the hook can read busy
 	// after a send that landed: the target was ALREADY mid-turn, so the
@@ -5171,6 +5182,9 @@ type sendArrivalBaseline struct {
 	// a failed read defaulting to "was not active" would turn a
 	// continuously-busy agent into a fake not-active-to-active transition.
 	statusOK bool
+	// turn is the hook-recorded turn marker before the send (see
+	// sendRetryOptions.turnMarker).
+	turn string
 }
 
 // captureArrivalBaseline snapshots the pane and status before a send. Each
@@ -5280,11 +5294,26 @@ func verifyContentArrival(target sendRetryTarget, message string, opts sendRetry
 	// such a tool has: the sent line consumed, new output or a fresh prompt
 	// below it (send.ShellProgressed).
 	obs := newSendObserver(opts.tool, message, baseline, false, hookBusyBeforeSend)
+
+	// Arrival only has to cover a redraw, but once the body is in, the turn
+	// start is what upgrades it to submitted — and a Codex turn surfaces to
+	// pane-based status seconds later, not within a redraw. Keep watching for
+	// it across the caller's full send budget before calling it typed.
+	submitChecks := opts.maxRetries
+	if submitChecks < checks {
+		submitChecks = checks
+	}
+
 	sawBody := false
 	lastContent := ""
-	for i := 0; i < checks; i++ {
+	for i := 0; i < checks || (sawBody && i < submitChecks); i++ {
 		// Strongest signal first: an idle agent that starts working received
 		// what it started working on, which is submission, not just arrival.
+		if baseline.statusOK && !baseline.wasActive && opts.turnMarker != nil {
+			if turn := opts.turnMarker(); turn != "" && turn != baseline.turn {
+				return deliverySubmitted, nil
+			}
+		}
 		if baseline.statusOK && !baseline.wasActive {
 			if status, err := target.GetStatus(); err == nil && status == "active" {
 				return deliverySubmitted, nil
@@ -5339,7 +5368,7 @@ func verifyContentArrival(target sendRetryTarget, message string, opts sendRetry
 				}
 			}
 		}
-		if i < checks-1 {
+		if i < checks-1 || (sawBody && i < submitChecks-1) {
 			time.Sleep(opts.checkDelay)
 		}
 	}
