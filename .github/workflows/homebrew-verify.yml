@@ -32,7 +32,8 @@ jobs:
     # A failed release deliberately leaves the previous version published and
     # the tap untouched, which is a consistent state — nothing to verify, and
     # verifying it would just add a second red check to an already-red release.
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    # Maintained forks do not publish to or advertise the upstream Homebrew tap.
+    if: github.repository == 'asheshgoplani/agent-deck' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     steps:
       - uses: actions/checkout@v7
       - name: Verify homebrew tap publishes a working formula
