@@ -17,6 +17,11 @@
 
 </div>
 
+> **kickinrad fork:** This repository packages a maintained fork of
+> [asheshgoplani/agent-deck](https://github.com/asheshgoplani/agent-deck). Each release is an
+> upstream release plus the fork's patches, tagged `v<upstream>-kickinrad.<n>` and published as
+> a GitHub pre-release. Install it with mise (see [Installation](#installation)).
+
 Agent Deck runs all your AI coding agents (Claude Code, Codex, Gemini CLI, OpenCode and more) in one terminal and shows which ones are working, waiting, or done.
 
 https://github.com/user-attachments/assets/e4f55917-435c-45ba-92cc-89737d0d1401
@@ -25,17 +30,35 @@ https://github.com/user-attachments/assets/e4f55917-435c-45ba-92cc-89737d0d1401
 
 Works on macOS, Linux and Windows (WSL).
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/asheshgoplani/agent-deck/main/install.sh | bash
+This maintained fork is distributed through mise. Fork releases are GitHub
+pre-releases, so track them with `prerelease = true`:
+
+```toml
+[tools]
+"github:kickinrad/agent-deck" = { version = "latest", prerelease = true }
 ```
 
-Or with Homebrew:
+Then run: `agent-deck`. Do not use the upstream installer, Homebrew tap, or
+`go install ...@latest`; each can replace the reviewed fork with upstream.
 
-```bash
-brew install asheshgoplani/tap/agent-deck
+This fork is updated only through mise. Do not run `agent-deck update`,
+install update timers, or use Homebrew to update it. In host configuration,
+disable native automatic checks, installation, and restart so mise owns
+updates:
+
+```toml
+[updates]
+check_enabled = false
+auto_install = false
+auto_restart = false
+auto_update_remotes = false
 ```
 
-Other ways to install, updates, uninstall and shell completion: [Install and update](docs/guide/install.md).
+The fork updater targets `kickinrad/agent-deck`; these settings ensure one
+reviewed version serves the CLI, web, and notifier.
+
+Uninstall and shell completion: [Install and update](docs/guide/install.md).
+Skip its install and update commands, which fetch upstream builds.
 
 ## Quick Start
 
