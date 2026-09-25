@@ -1,10 +1,13 @@
 package web
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 )
@@ -118,18 +121,59 @@ func (s *Server) handleServiceWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := serveEmbeddedFile(
-		w,
-		"static/sw.js",
-		"application/javascript; charset=utf-8",
-		map[string]string{
-			"Cache-Control":          "no-cache",
-			"Service-Worker-Allowed": "/",
-		},
-	); err != nil {
+	body, err := serviceWorkerSource()
+	if err != nil {
 		http.Error(w, "service worker unavailable", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Service-Worker-Allowed", "/")
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
+
+var (
+	serviceWorkerOnce sync.Once
+	serviceWorkerBody []byte
+	serviceWorkerErr  error
+)
+
+// serviceWorkerSource serves sw.js with its shell cache name keyed to the
+// embedded static tree. The worker serves shell assets cache-first, so a build
+// whose assets differ without a CACHE_VERSION bump (any patched build) would
+// otherwise keep running the previously cached bundle.
+func serviceWorkerSource() ([]byte, error) {
+	serviceWorkerOnce.Do(func() {
+		body, err := embeddedStaticFiles.ReadFile("static/sw.js")
+		if err != nil {
+			serviceWorkerErr = fmt.Errorf("read embedded file %q: %w", "static/sw.js", err)
+			return
+		}
+		sum := sha256.New()
+		err = fs.WalkDir(embeddedStaticFiles, "static", func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			data, err := embeddedStaticFiles.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(sum, "%s\x00%d\x00", path, len(data))
+			sum.Write(data)
+			return nil
+		})
+		if err != nil {
+			serviceWorkerErr = err
+			return
+		}
+		digest := hex.EncodeToString(sum.Sum(nil))[:12]
+		serviceWorkerBody = cacheVersionPattern.ReplaceAll(body, []byte("${1}-"+digest+`"`))
+	})
+	return serviceWorkerBody, serviceWorkerErr
+}
+
+var cacheVersionPattern = regexp.MustCompile(`(const CACHE_VERSION = "[^"]+)"`)
 
 func serveEmbeddedFile(w http.ResponseWriter, path, contentType string, headers map[string]string) error {
 	body, err := embeddedStaticFiles.ReadFile(path)
