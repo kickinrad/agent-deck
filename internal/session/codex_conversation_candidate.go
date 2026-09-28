@@ -41,7 +41,10 @@ func (i *Instance) codexConversationHome() string {
 }
 
 // validCodexHook checks the payload (or legacy anchor) before any status,
-// activity, acknowledgement, generation, or binding mutation.
+// activity, acknowledgement, generation, or binding mutation. A hook that names
+// no conversation at all (a legacy notify payload with no anchor) cannot bind
+// or claim a turn, so it keeps upstream's hook-over-pane status authority;
+// one that carries turn evidence without an identity is rejected.
 func (i *Instance) validCodexHook(status *HookStatus) bool {
 	if i == nil || status == nil {
 		return false
@@ -52,6 +55,9 @@ func (i *Instance) validCodexHook(status *HookStatus) bool {
 	sessionID := strings.TrimSpace(status.SessionID)
 	if sessionID == "" {
 		sessionID = ReadHookSessionAnchor(i.ID)
+	}
+	if sessionID == "" {
+		return status.CodexStartedGeneration == "" && status.CodexCompletedGeneration == ""
 	}
 	return i.ValidCodexConversationCandidate(sessionID)
 }
