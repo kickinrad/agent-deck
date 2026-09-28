@@ -233,3 +233,19 @@ func applyHookWithDB(t *testing.T, inst *Instance, hook *HookStatus, db *statedb
 	defer statedb.SetGlobal(prior)
 	inst.UpdateHookStatus(hook)
 }
+
+// A legacy notify payload names no conversation and carries no turn evidence.
+// It cannot bind, so it keeps hook-over-pane status authority (#2190); turn
+// evidence without an identity stays rejected.
+func TestCodexHookWithoutIdentityKeepsStatusAuthority(t *testing.T) {
+	setupSessionXDGPathEnv(t)
+	t.Setenv("CODEX_HOME", t.TempDir())
+	inst := &Instance{ID: "codex-legacy-notify", Tool: "codex", ProjectPath: t.TempDir()}
+	if !inst.validCodexHook(&HookStatus{Status: "waiting", Event: "agent-turn-complete", UpdatedAt: time.Now()}) {
+		t.Fatal("identity-less status hook rejected")
+	}
+	if inst.validCodexHook(&HookStatus{Status: "waiting", Event: "agent-turn-complete", UpdatedAt: time.Now(),
+		CodexStartedGeneration: "x:turn", CodexCompletedGeneration: "x:turn"}) {
+		t.Fatal("identity-less turn evidence accepted")
+	}
+}
