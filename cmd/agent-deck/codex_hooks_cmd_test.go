@@ -45,8 +45,7 @@ func TestMapCodexNotifyToStatus(t *testing.T) {
 }
 
 func TestHandleCodexNotify_WritesStatus(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	useTempCodexHome(t)
 	t.Setenv("AGENTDECK_INSTANCE_ID", "inst-1")
 	t.Setenv("CODEX_SESSION_ID", "")
 
@@ -86,8 +85,7 @@ func TestHandleCodexNotify_WritesStatus(t *testing.T) {
 }
 
 func TestHandleCodexNotify_ArgPayload(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	useTempCodexHome(t)
 	t.Setenv("AGENTDECK_INSTANCE_ID", "inst-arg")
 	t.Setenv("CODEX_SESSION_ID", "")
 
@@ -117,8 +115,7 @@ func TestHandleCodexNotify_ArgPayload(t *testing.T) {
 }
 
 func TestHandleCodexNotify_JSONRPCMethodPayload(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	useTempCodexHome(t)
 	t.Setenv("AGENTDECK_INSTANCE_ID", "inst-method")
 	t.Setenv("CODEX_SESSION_ID", "")
 
@@ -148,8 +145,7 @@ func TestHandleCodexNotify_JSONRPCMethodPayload(t *testing.T) {
 }
 
 func TestHandleCodexNotify_EmptyTailEventKeepsJSONEmptyAndPersistsAnchor(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	useTempCodexHome(t)
 	t.Setenv("AGENTDECK_INSTANCE_ID", "inst-sticky")
 	t.Setenv("CODEX_SESSION_ID", "")
 
@@ -420,8 +416,7 @@ func TestCleanStaleHookFilesPreservesCodexWriterLockForLiveStatus(t *testing.T) 
 }
 
 func TestCodexHooksInstallUninstall(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	useTempCodexHome(t)
 
 	handleCodexHooksInstall()
 
@@ -451,8 +446,7 @@ func TestCodexHooksInstallUninstall(t *testing.T) {
 }
 
 func TestCodexHooksInstall_UpgradesLegacyTableWithoutMarkers(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	useTempCodexHome(t)
 
 	configPath := getCodexConfigPath()
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
@@ -479,8 +473,7 @@ func TestCodexHooksInstall_UpgradesLegacyTableWithoutMarkers(t *testing.T) {
 }
 
 func TestCodexHooksInstall_UpgradesLegacyMarkerBlock(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	useTempCodexHome(t)
 
 	configPath := getCodexConfigPath()
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
