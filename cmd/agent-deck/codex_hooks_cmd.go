@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/asheshgoplani/agent-deck/internal/atomicfile"
 	"github.com/asheshgoplani/agent-deck/internal/session"
 )
 
@@ -432,75 +434,169 @@ func printCodexHooksUsage(w io.Writer) {
 	fmt.Fprintln(w, "  status       Show current hook install status")
 }
 
-func handleCodexHooksInstall() {
-	configPath := getCodexConfigPath()
-	content, _ := readFileOrEmpty(configPath)
+// Outcome of one install attempt against a config.toml.
+type codexInstallOutcome int
 
-	block := codexNotifyMarkerBegin + "\n" +
-		codexNotifyLine + "\n" +
-		codexNotifyMarkerEnd + "\n"
+const (
+	codexInstallUnchanged codexInstallOutcome = iota // hook already present; nothing written
+	codexInstallInstalled                            // block added to a config that had no notify setting
+	codexInstallUpgraded                             // an older agent-deck notify form replaced in place
+)
 
-	if strings.Contains(content, codexNotifyMarkerBegin) {
-		begin := strings.Index(content, codexNotifyMarkerBegin)
-		endRel := strings.Index(content[begin:], codexNotifyMarkerEnd)
-		if endRel != -1 {
-			end := begin + endRel + len(codexNotifyMarkerEnd)
-			updated := strings.TrimSpace(content[:begin] + content[end:])
-			updated = prependCodexNotifyBlock(block, updated)
-			if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
-				fmt.Fprintf(os.Stderr, "Error creating codex config dir: %v\n", err)
-				os.Exit(1)
+var errCodexNotifyConflict = errors.New("existing notify setting found")
+var errCodexNotifyMalformed = errors.New("malformed agent-deck Codex hook block in config")
+var errCodexNotifyPreservation = errors.New("refusing to write: the upsert would drop existing config lines")
+
+func codexNotifyBlockText() string {
+	return codexNotifyMarkerBegin + "\n" + codexNotifyLine + "\n" + codexNotifyMarkerEnd + "\n"
+}
+
+// upsertCodexNotifyBlock returns content with the agent-deck notify block
+// inserted or replaced. Every line outside the marked block is the user's (or
+// their dotfiles manager's) and is carried through unchanged and in place;
+// the installer never rewrites the file from what it believes the config
+// should be. A pre-existing block is replaced where it stands, a legacy
+// [notify] table is migrated, and a fresh block goes first so the top-level
+// key precedes any table.
+func upsertCodexNotifyBlock(content string) (string, codexInstallOutcome, error) {
+	lines := strings.Split(content, "\n")
+	begin, end := -1, -1
+	for i, line := range lines {
+		switch strings.TrimSpace(line) {
+		case codexNotifyMarkerBegin:
+			if begin == -1 {
+				begin = i
 			}
-			if err := os.WriteFile(configPath, []byte(updated), 0644); err != nil {
-				fmt.Fprintf(os.Stderr, "Error writing codex config: %v\n", err)
-				os.Exit(1)
+		case codexNotifyMarkerEnd:
+			if begin != -1 && end == -1 {
+				end = i
 			}
-			fmt.Println("Codex notify hook upgraded successfully.")
-			fmt.Printf("Config: %s\n", configPath)
-			return
 		}
+	}
+	if begin != -1 {
+		if end == -1 {
+			return "", codexInstallUnchanged, errCodexNotifyMalformed
+		}
+		if end-begin == 2 && codexNotifyExactLineRe.MatchString(lines[begin+1]) {
+			return content, codexInstallUnchanged, nil
+		}
+		out := make([]string, 0, len(lines))
+		out = append(out, lines[:begin]...)
+		out = append(out, codexNotifyMarkerBegin, codexNotifyLine, codexNotifyMarkerEnd)
+		out = append(out, lines[end+1:]...)
+		return ensureTrailingNewline(strings.Join(out, "\n")), codexInstallUpgraded, nil
 	}
 
 	if updated, removed := removeLegacyCodexNotifyTable(content); removed {
-		updated = prependCodexNotifyBlock(block, strings.TrimSpace(updated))
-		if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating codex config dir: %v\n", err)
-			os.Exit(1)
-		}
-		if err := os.WriteFile(configPath, []byte(updated), 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "Error writing codex config: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("Codex notify hook upgraded successfully.")
-		fmt.Printf("Config: %s\n", configPath)
-		return
+		return prependCodexNotifyBlock(codexNotifyBlockText(), updated), codexInstallUpgraded, nil
 	}
 
 	if codexNotifyExactRe.MatchString(content) {
-		fmt.Println("Codex notify hook is already installed.")
-		fmt.Printf("Config: %s\n", configPath)
-		return
+		// The exact notify line already lives outside our markers (for example
+		// written by a dotfiles manager). Adding a block would duplicate the key.
+		return content, codexInstallUnchanged, nil
 	}
 
 	if codexNotifyKeyRe.MatchString(content) || codexNotifyTableRe.MatchString(content) {
-		fmt.Fprintf(os.Stderr, "Error: existing notify setting found in %s\n", configPath)
-		fmt.Fprintln(os.Stderr, "Please merge manually by setting:")
-		fmt.Fprintln(os.Stderr, `  notify = ["agent-deck", "codex-notify"]`)
-		os.Exit(1)
+		return "", codexInstallUnchanged, errCodexNotifyConflict
 	}
 
-	newContent := prependCodexNotifyBlock(block, content)
+	return prependCodexNotifyBlock(codexNotifyBlockText(), content), codexInstallInstalled, nil
+}
 
+// codexConfigLinesPreserved reports whether every line of before that the
+// installer does not own still appears in after. It is the last guard before
+// a write: whatever the upsert logic does, it may not lose a user's line.
+func codexConfigLinesPreserved(before, after string) bool {
+	owned := func(line string) bool {
+		t := strings.TrimSpace(line)
+		return t == "" || t == codexNotifyMarkerBegin || t == codexNotifyMarkerEnd || t == "[notify]" ||
+			codexNotifyExactLineRe.MatchString(line) || codexLegacyNotifyProgramLineRe.MatchString(line)
+	}
+	remaining := map[string]int{}
+	for _, line := range strings.Split(after, "\n") {
+		remaining[line]++
+	}
+	for _, line := range strings.Split(before, "\n") {
+		if owned(line) {
+			continue
+		}
+		if remaining[line] == 0 {
+			return false
+		}
+		remaining[line]--
+	}
+	return true
+}
+
+// installCodexNotifyHook upserts the notify block into configPath. It writes
+// only when the content changes, atomically, keeping the file's mode. A read
+// error other than "does not exist" aborts before anything is written: an
+// unreadable config is not an empty one.
+func installCodexNotifyHook(configPath string) (codexInstallOutcome, error) {
+	content, err := readFileOrEmpty(configPath)
+	if err != nil {
+		return codexInstallUnchanged, fmt.Errorf("reading codex config: %w", err)
+	}
+	updated, outcome, err := upsertCodexNotifyBlock(content)
+	if err != nil {
+		return codexInstallUnchanged, err
+	}
+	if outcome == codexInstallUnchanged {
+		return outcome, nil
+	}
+	if !codexConfigLinesPreserved(content, updated) {
+		return codexInstallUnchanged, errCodexNotifyPreservation
+	}
+	if err := writeCodexConfig(configPath, updated); err != nil {
+		return codexInstallUnchanged, fmt.Errorf("writing codex config: %w", err)
+	}
+	return outcome, nil
+}
+
+// writeCodexConfig replaces configPath atomically (temp file + rename, fsync)
+// so a crash or a concurrent reader never sees a partial file, and keeps the
+// existing mode so a private (0600) config stays private.
+func writeCodexConfig(configPath, content string) error {
+	perm := os.FileMode(0644)
+	if info, err := os.Stat(configPath); err == nil {
+		perm = info.Mode().Perm()
+	}
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating codex config dir: %v\n", err)
-		os.Exit(1)
+		return err
 	}
-	if err := os.WriteFile(configPath, []byte(newContent), 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing codex config: %v\n", err)
-		os.Exit(1)
-	}
+	return atomicfile.WriteFileDurable(configPath, []byte(content), perm)
+}
 
-	fmt.Println("Codex notify hook installed successfully.")
+func ensureTrailingNewline(s string) string {
+	if s == "" || strings.HasSuffix(s, "\n") {
+		return s
+	}
+	return s + "\n"
+}
+
+func handleCodexHooksInstall() {
+	configPath := getCodexConfigPath()
+	outcome, err := installCodexNotifyHook(configPath)
+	if err != nil {
+		if errors.Is(err, errCodexNotifyConflict) {
+			fmt.Fprintf(os.Stderr, "Error: existing notify setting found in %s\n", configPath)
+			fmt.Fprintln(os.Stderr, "Please merge manually by setting:")
+			fmt.Fprintln(os.Stderr, `  notify = ["agent-deck", "codex-notify"]`)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Config %s was left unchanged.\n", configPath)
+		}
+		os.Exit(1)
+	}
+	switch outcome {
+	case codexInstallUnchanged:
+		fmt.Println("Codex notify hook is already installed.")
+	case codexInstallUpgraded:
+		fmt.Println("Codex notify hook upgraded successfully.")
+	default:
+		fmt.Println("Codex notify hook installed successfully.")
+	}
 	fmt.Printf("Config: %s\n", configPath)
 }
 
@@ -526,7 +622,7 @@ func handleCodexHooksUninstall() {
 			updated += "\n"
 		}
 
-		if err := os.WriteFile(configPath, []byte(updated), 0644); err != nil {
+		if err := writeCodexConfig(configPath, updated); err != nil {
 			fmt.Fprintf(os.Stderr, "Error writing codex config: %v\n", err)
 			os.Exit(1)
 		}
@@ -535,7 +631,7 @@ func handleCodexHooksUninstall() {
 	}
 
 	if updated, removed := removeLegacyCodexNotifyTable(content); removed {
-		if err := os.WriteFile(configPath, []byte(updated), 0644); err != nil {
+		if err := writeCodexConfig(configPath, updated); err != nil {
 			fmt.Fprintf(os.Stderr, "Error writing codex config: %v\n", err)
 			os.Exit(1)
 		}
@@ -544,7 +640,7 @@ func handleCodexHooksUninstall() {
 	}
 
 	if updated, removed := removeExactCodexNotifyLine(content); removed {
-		if err := os.WriteFile(configPath, []byte(updated), 0644); err != nil {
+		if err := writeCodexConfig(configPath, updated); err != nil {
 			fmt.Fprintf(os.Stderr, "Error writing codex config: %v\n", err)
 			os.Exit(1)
 		}
@@ -655,12 +751,13 @@ func readFileOrEmpty(path string) (string, error) {
 	return string(data), nil
 }
 
+// prependCodexNotifyBlock puts the block first, so the top-level notify key
+// precedes any [table], and leaves the existing content byte for byte.
 func prependCodexNotifyBlock(block, content string) string {
-	trimmed := strings.TrimSpace(content)
-	if trimmed == "" {
+	if strings.TrimSpace(content) == "" {
 		return block
 	}
-	return strings.TrimRight(block, "\n") + "\n\n" + trimmed + "\n"
+	return strings.TrimRight(block, "\n") + "\n\n" + ensureTrailingNewline(content)
 }
 
 func removeLegacyCodexNotifyTable(content string) (string, bool) {
