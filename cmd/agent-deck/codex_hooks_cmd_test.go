@@ -61,8 +61,7 @@ func seedCodexNotifyRollout(t *testing.T, home, threadID string) {
 }
 
 func TestHandleCodexNotify_WritesStatus(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpHome := filepath.Dir(filepath.Dir(useTempCodexHome(t)))
 	t.Setenv("AGENTDECK_INSTANCE_ID", "inst-1")
 	t.Setenv("CODEX_SESSION_ID", "")
 	seedCodexNotifyRollout(t, tmpHome, "abc-123")
@@ -101,8 +100,7 @@ func TestHandleCodexNotify_WritesStatus(t *testing.T) {
 }
 
 func TestHandleCodexNotify_ArgPayload(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpHome := filepath.Dir(filepath.Dir(useTempCodexHome(t)))
 	t.Setenv("AGENTDECK_INSTANCE_ID", "inst-arg")
 	t.Setenv("CODEX_SESSION_ID", "")
 	seedCodexNotifyRollout(t, tmpHome, "thr-1")
@@ -131,8 +129,7 @@ func TestHandleCodexNotify_ArgPayload(t *testing.T) {
 }
 
 func TestHandleCodexNotify_JSONRPCMethodPayload(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpHome := filepath.Dir(filepath.Dir(useTempCodexHome(t)))
 	t.Setenv("AGENTDECK_INSTANCE_ID", "inst-method")
 	t.Setenv("CODEX_SESSION_ID", "")
 	seedCodexNotifyRollout(t, tmpHome, "thr-42")
@@ -161,8 +158,7 @@ func TestHandleCodexNotify_JSONRPCMethodPayload(t *testing.T) {
 }
 
 func TestHandleCodexNotify_EmptyTailEventKeepsJSONEmptyAndPersistsAnchor(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	useTempCodexHome(t)
 	t.Setenv("AGENTDECK_INSTANCE_ID", "inst-sticky")
 	t.Setenv("CODEX_SESSION_ID", "")
 
@@ -420,8 +416,7 @@ func TestCleanStaleHookFilesPreservesCodexWriterLockForLiveStatus(t *testing.T) 
 }
 
 func TestCodexHooksInstallUninstall(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	useTempCodexHome(t)
 
 	handleCodexHooksInstall()
 
@@ -451,8 +446,7 @@ func TestCodexHooksInstallUninstall(t *testing.T) {
 }
 
 func TestCodexHooksInstall_UpgradesLegacyTableWithoutMarkers(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	useTempCodexHome(t)
 
 	configPath := getCodexConfigPath()
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
@@ -479,8 +473,7 @@ func TestCodexHooksInstall_UpgradesLegacyTableWithoutMarkers(t *testing.T) {
 }
 
 func TestCodexHooksInstall_UpgradesLegacyMarkerBlock(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	useTempCodexHome(t)
 
 	configPath := getCodexConfigPath()
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
@@ -599,8 +592,7 @@ func TestWriteCodexHookStatus_CorruptPriorFailsClosedAndWarns(t *testing.T) {
 // subagent's "waiting" flipped a working session to waiting on every finished
 // subagent (rc feedback 2026-09-23).
 func TestHandleCodexNotify_SubagentTurnCompleteKeepsMainStatus(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpHome := filepath.Dir(filepath.Dir(useTempCodexHome(t)))
 	t.Setenv("AGENTDECK_INSTANCE_ID", "inst-subagent")
 	t.Setenv("CODEX_SESSION_ID", "")
 	mainSID, subSID := "main-thread-0155", "subagent-thread-0155"

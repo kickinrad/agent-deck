@@ -96,6 +96,11 @@ func isolatePackageHome(pattern string) {
 	os.Unsetenv("XDG_DATA_HOME")
 	os.Unsetenv("XDG_CACHE_HOME")
 	os.Unsetenv("XDG_STATE_HOME")
+	// getCodexConfigPath prefers CODEX_HOME over HOME/.codex, so an exported
+	// CODEX_HOME let Codex-hook tests reach the developer's real config and
+	// replace ~/.config/codex/config.toml with the bare notify block
+	// (2026-09-29). Clear it so the Codex home tracks the isolated HOME too.
+	os.Unsetenv("CODEX_HOME")
 }
 
 // cleanupTestSessions kills any tmux sessions created during testing.
