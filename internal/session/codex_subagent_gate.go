@@ -198,6 +198,10 @@ func (i *Instance) shouldRejectCodexSubagentRebind(candidateID string) bool {
 // events and the readers refuse records carrying them (codexHookFromForeignThread);
 // otherwise every finished subagent reads as the pane's turn-finished edge
 // and flips a working session running -> waiting (rc feedback 2026-09-23).
+// A thread with a parent is spawned too, whatever its thread_source says:
+// Codex 0.151+ labels its approval reviewer thread_source=guardian_review
+// (source.subagent.other=guardian, parent_thread_id set), and that thread
+// refuses operator turns like any other child.
 // Threads without a flushed rollout are not subagents here (fail-open).
 func CodexSubagentThread(threadID, codexHome string) bool {
 	threadID = strings.TrimSpace(threadID)
@@ -205,7 +209,7 @@ func CodexSubagentThread(threadID, codexHome string) bool {
 		return false
 	}
 	meta, ok := codexThreadMetaForSession(threadID, codexHome)
-	return ok && meta.ThreadSource == "subagent"
+	return ok && (meta.ThreadSource == "subagent" || meta.ParentThreadID != "")
 }
 
 // codexHookFromForeignThread reports whether a hook status record belongs to a
@@ -293,5 +297,8 @@ func codexSessionNeedsFork(sessionID, codexHome string) bool {
 	if path == "" {
 		return false
 	}
-	return readCodexRolloutThreadMeta(path).ThreadSource == "subagent"
+	// Same definition of a child thread as the rebind gate: a binding poisoned
+	// to a guardian-review thread (parent_thread_id set) needs the fork escape
+	// as much as one poisoned to a "subagent" thread.
+	return CodexSubagentThread(sessionID, codexHome)
 }
