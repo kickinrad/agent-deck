@@ -138,6 +138,29 @@ func TestCodexHookRebind_RejectsSubagentThread(t *testing.T) {
 	}
 }
 
+// Codex 0.151+ labels its approval reviewer thread_source=guardian_review
+// with a parent thread. Its turn-complete fires mid-turn, while the parent
+// waits on the approval, so it must neither rebind nor end the pane's turn.
+func TestCodexHookRebind_RejectsGuardianReviewThread(t *testing.T) {
+	inst, codexHome := newCodexGateInstance(t)
+
+	mainSID := uniqueSID(t)
+	guardianSID := uniqueSID(t)
+	seedCodexRolloutWithMeta(t, codexHome, mainSID, "user", "", false)
+	seedCodexRolloutWithMeta(t, codexHome, guardianSID, "guardian_review", mainSID, true)
+
+	inst.CodexSessionID = mainSID
+	inst.UpdateHookStatus(&HookStatus{Status: "running", SessionID: mainSID, Event: "turn.started", UpdatedAt: time.Now()})
+	inst.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: guardianSID, Event: "agent-turn-complete", UpdatedAt: time.Now()})
+
+	if inst.CodexSessionID != mainSID {
+		t.Fatalf("guardian review thread usurped the binding: got %q, want %q", inst.CodexSessionID, mainSID)
+	}
+	if inst.hookStatus != "running" {
+		t.Fatalf("guardian review turn-complete replaced the pane's status: got %q, want running", inst.hookStatus)
+	}
+}
+
 func TestCodexHookRebind_ColdStartRejectsSubagentThread(t *testing.T) {
 	inst, codexHome := newCodexGateInstance(t)
 
