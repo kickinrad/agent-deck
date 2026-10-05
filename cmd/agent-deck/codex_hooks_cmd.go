@@ -144,6 +144,17 @@ func parseCodexNotifyPayload(data []byte) (event, sessionID, turnID string) {
 	return event, sessionID, turnID
 }
 
+// codexNotifyDoneSignal reads a completion sentinel from a turn-complete
+// payload's final assistant message — Codex's equivalent of the Stop-hook
+// transcript scan.
+func codexNotifyDoneSignal(data []byte) (session.DoneSignal, bool) {
+	var t codexNotifyText
+	if json.Unmarshal(data, &t) != nil {
+		return session.DoneSignal{}, false
+	}
+	return session.ScanDoneSentinel(t.LastAssistantMessage)
+}
+
 // handleCodexNotify processes Codex notify payloads.
 func handleCodexNotify() {
 	instanceID := os.Getenv("AGENTDECK_INSTANCE_ID")
@@ -215,7 +226,13 @@ func handleCodexNotify() {
 		return
 	}
 
-	writeCodexHookStatus(instanceID, status, sessionID, event, turnID)
+	var done *session.DoneSignal
+	if _, completed := codexTurnEdge(event); completed {
+		if sig, ok := codexNotifyDoneSignal(data); ok {
+			done = &sig
+		}
+	}
+	writeCodexHookStatus(instanceID, status, sessionID, event, done, turnID)
 	spoolCommsFromCodexNotify(instanceID, sessionID, turnID, event, data)
 }
 
@@ -283,7 +300,7 @@ func codexTurnEdge(event string) (started, completed bool) {
 // writeCodexHookStatus retains both edges of the current turn under a file
 // lock. Notify invocations are separate processes and can overlap; serializing
 // the read/modify/write makes the generation proof deterministic.
-func writeCodexHookStatus(instanceID, status, sessionID, event string, turnIDs ...string) {
+func writeCodexHookStatus(instanceID, status, sessionID, event string, done *session.DoneSignal, turnIDs ...string) {
 	if instanceID == "" || status == "" {
 		return
 	}
@@ -389,6 +406,9 @@ func writeCodexHookStatus(instanceID, status, sessionID, event string, turnIDs .
 	prior.Status, prior.SessionID, prior.Event = status, sessionID, event
 	prior.Timestamp = time.Now().Unix()
 	prior.DoneStatus, prior.DoneSummary, prior.TranscriptPath, prior.Cwd = "", "", "", ""
+	if done != nil {
+		prior.DoneStatus, prior.DoneSummary = done.Status, done.Summary
+	}
 	writeHookStatusFile(instanceID, prior, false)
 }
 

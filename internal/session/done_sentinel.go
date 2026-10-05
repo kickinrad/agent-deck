@@ -53,17 +53,11 @@ func ParseDoneSentinel(line string) (DoneSignal, bool) {
 	return DoneSignal{Status: status, Summary: summary}, true
 }
 
-// ScanDoneSentinel scans multi-line text and returns the LAST line that parses
-// as a valid sentinel. Last-wins so a worker that retried (printing fail then
-// ok) reports its final outcome.
+// ScanDoneSentinel parses the final non-blank line of a worker's final
+// message. Only that line counts: a sentinel quoted mid-message (a worker
+// explaining the contract) is not a completion. Shared by every harness so
+// Claude and Codex workers follow one rule.
 func ScanDoneSentinel(text string) (DoneSignal, bool) {
-	var found DoneSignal
-	var ok bool
-	for line := range strings.SplitSeq(text, "\n") {
-		if sig, valid := ParseDoneSentinel(line); valid {
-			found = sig
-			ok = true
-		}
-	}
-	return found, ok
+	text = strings.TrimRight(text, " \t\r\n")
+	return ParseDoneSentinel(text[strings.LastIndexByte(text, '\n')+1:])
 }
