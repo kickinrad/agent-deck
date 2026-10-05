@@ -195,8 +195,8 @@ func TestHandleCodexNotify_EmptyTailEventKeepsJSONEmptyAndPersistsAnchor(t *test
 
 func TestWriteCodexHookStatus_NewerStartSupersedesCompletedGeneration(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	writeCodexHookStatus("inst-generation", "running", "thread-1", "turn.started", "turn-1")
-	writeCodexHookStatus("inst-generation", "waiting", "thread-1", "turn.completed", "turn-1")
+	writeCodexHookStatus("inst-generation", "running", "thread-1", "turn.started", nil, "turn-1")
+	writeCodexHookStatus("inst-generation", "waiting", "thread-1", "turn.completed", nil, "turn-1")
 	path := filepath.Join(getHooksDir(), "inst-generation.json")
 	var completed hookStatusFile
 	data, err := os.ReadFile(path)
@@ -209,7 +209,7 @@ func TestWriteCodexHookStatus_NewerStartSupersedesCompletedGeneration(t *testing
 	if completed.CodexStartedGeneration != completed.CodexCompletedGeneration {
 		t.Fatal("matching completion was not retained")
 	}
-	writeCodexHookStatus("inst-generation", "running", "thread-1", "turn.started", "turn-2")
+	writeCodexHookStatus("inst-generation", "running", "thread-1", "turn.started", nil, "turn-2")
 	var superseded hookStatusFile
 	data, err = os.ReadFile(path)
 	if err != nil {
@@ -227,8 +227,8 @@ func TestWriteCodexHookStatus_CompletionMustMatchTurnIdentity(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("AGENTDECK_HOOKS_DIR", filepath.Join(t.TempDir(), "hooks"))
 
-	writeCodexHookStatus("turn-match", "running", "thread-1", "turn.started", "turn-2")
-	writeCodexHookStatus("turn-match", "waiting", "thread-1", "turn.completed", "turn-1")
+	writeCodexHookStatus("turn-match", "running", "thread-1", "turn.started", nil, "turn-2")
+	writeCodexHookStatus("turn-match", "waiting", "thread-1", "turn.completed", nil, "turn-1")
 	data, err := os.ReadFile(filepath.Join(getHooksDir(), "turn-match.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -241,7 +241,7 @@ func TestWriteCodexHookStatus_CompletionMustMatchTurnIdentity(t *testing.T) {
 		t.Fatalf("out-of-order completion converged live turn: %#v", got)
 	}
 
-	writeCodexHookStatus("turn-match", "waiting", "thread-1", "turn.completed", "turn-2")
+	writeCodexHookStatus("turn-match", "waiting", "thread-1", "turn.completed", nil, "turn-2")
 	data, err = os.ReadFile(filepath.Join(getHooksDir(), "turn-match.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -257,8 +257,8 @@ func TestWriteCodexHookStatus_CompletionMustMatchTurnIdentity(t *testing.T) {
 func TestWriteCodexHookStatus_IdentityLessCompletionFailsClosed(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("AGENTDECK_HOOKS_DIR", filepath.Join(t.TempDir(), "hooks"))
-	writeCodexHookStatus("no-turn", "running", "thread-1", "turn.started", "turn-1")
-	writeCodexHookStatus("no-turn", "waiting", "thread-1", "agent-turn-complete", "")
+	writeCodexHookStatus("no-turn", "running", "thread-1", "turn.started", nil, "turn-1")
+	writeCodexHookStatus("no-turn", "waiting", "thread-1", "agent-turn-complete", nil, "")
 	data, err := os.ReadFile(filepath.Join(getHooksDir(), "no-turn.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -275,14 +275,14 @@ func TestWriteCodexHookStatus_IdentityLessCompletionFailsClosed(t *testing.T) {
 	}
 	// A repeat completion is the same turn, not a fresh sequence.
 	seq := got.CodexCompletedSequence
-	writeCodexHookStatus("no-turn", "waiting", "thread-1", "agent-turn-complete", "")
+	writeCodexHookStatus("no-turn", "waiting", "thread-1", "agent-turn-complete", nil, "")
 	data, err = os.ReadFile(filepath.Join(getHooksDir(), "no-turn.json"))
 	if err != nil || json.Unmarshal(data, &got) != nil || got.CodexCompletedSequence != seq {
 		t.Fatalf("completion retry changed sequence: %#v err=%v", got, err)
 	}
 	// A new proven start/completion pair advances exactly once.
-	writeCodexHookStatus("no-turn", "running", "thread-1", "turn.started", "")
-	writeCodexHookStatus("no-turn", "waiting", "thread-1", "agent-turn-complete", "")
+	writeCodexHookStatus("no-turn", "running", "thread-1", "turn.started", nil, "")
+	writeCodexHookStatus("no-turn", "waiting", "thread-1", "agent-turn-complete", nil, "")
 	data, err = os.ReadFile(filepath.Join(getHooksDir(), "no-turn.json"))
 	if err != nil || json.Unmarshal(data, &got) != nil || got.CodexCompletedSequence <= seq {
 		t.Fatalf("distinct fallback turn did not advance: %#v err=%v", got, err)
@@ -300,7 +300,7 @@ func TestWriteCodexHookStatus_PartialPriorFailsClosed(t *testing.T) {
 	if err := os.WriteFile(path, partial, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	writeCodexHookStatus("partial", "running", "", "turn.started", "")
+	writeCodexHookStatus("partial", "running", "", "turn.started", nil, "")
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -313,7 +313,7 @@ func TestWriteCodexHookStatus_PartialPriorFailsClosed(t *testing.T) {
 func TestWriteCodexHookStatus_LegacyCompletionConvergesWithoutStart(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("AGENTDECK_HOOKS_DIR", filepath.Join(t.TempDir(), "hooks"))
-	writeCodexHookStatus("legacy-complete", "waiting", "thread-1", "agent-turn-complete", "turn-1")
+	writeCodexHookStatus("legacy-complete", "waiting", "thread-1", "agent-turn-complete", nil, "turn-1")
 	data, err := os.ReadFile(filepath.Join(getHooksDir(), "legacy-complete.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -333,8 +333,8 @@ func TestWriteCodexHookStatus_LegacyCompletionConvergesWithoutStart(t *testing.T
 func TestWriteCodexHookStatus_IdentityLessStartClearsPriorCompletion(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("AGENTDECK_HOOKS_DIR", filepath.Join(t.TempDir(), "hooks"))
-	writeCodexHookStatus("stale-pair", "waiting", "thread-1", "agent-turn-complete", "turn-1")
-	writeCodexHookStatus("stale-pair", "running", "", "turn.started", "")
+	writeCodexHookStatus("stale-pair", "waiting", "thread-1", "agent-turn-complete", nil, "turn-1")
+	writeCodexHookStatus("stale-pair", "running", "", "turn.started", nil, "")
 	data, err := os.ReadFile(filepath.Join(getHooksDir(), "stale-pair.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -357,7 +357,7 @@ func TestWriteCodexHookStatus_ConcurrentFleetPersistence(t *testing.T) {
 			for n := 0; n < size; n++ {
 				id := fmt.Sprintf("instance-%03d", n)
 				turn := fmt.Sprintf("turn-%03d", n)
-				writeCodexHookStatus(id, "running", id, "turn.started", turn)
+				writeCodexHookStatus(id, "running", id, "turn.started", nil, turn)
 			}
 			var wg sync.WaitGroup
 			wg.Add(size)
@@ -366,7 +366,7 @@ func TestWriteCodexHookStatus_ConcurrentFleetPersistence(t *testing.T) {
 				go func() {
 					defer wg.Done()
 					id := fmt.Sprintf("instance-%03d", n)
-					writeCodexHookStatus(id, "waiting", id, "turn.completed", fmt.Sprintf("turn-%03d", n))
+					writeCodexHookStatus(id, "waiting", id, "turn.completed", nil, fmt.Sprintf("turn-%03d", n))
 				}()
 			}
 			wg.Wait()
@@ -533,8 +533,8 @@ func TestWriteCodexHookStatus_EmptyPriorFileRecovers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	writeCodexHookStatus("inst-empty", "running", "thread-1", "turn.started", "turn-1")
-	writeCodexHookStatus("inst-empty", "waiting", "thread-1", "turn.completed", "turn-1")
+	writeCodexHookStatus("inst-empty", "running", "thread-1", "turn.started", nil, "turn-1")
+	writeCodexHookStatus("inst-empty", "waiting", "thread-1", "turn.completed", nil, "turn-1")
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -569,7 +569,7 @@ func TestWriteCodexHookStatus_CorruptPriorFailsClosedAndWarns(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	writeCodexHookStatus("inst-corrupt", "waiting", "thread-1", "turn.completed", "turn-1")
+	writeCodexHookStatus("inst-corrupt", "waiting", "thread-1", "turn.completed", nil, "turn-1")
 
 	data, err := os.ReadFile(path)
 	if err != nil {
