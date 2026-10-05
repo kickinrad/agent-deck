@@ -93,3 +93,14 @@ func TestScanDoneSentinel_None(t *testing.T) {
 		t.Errorf("expected no sentinel found in plain text")
 	}
 }
+
+// The sentinel counts only as the final non-blank line of the message: a
+// worker quoting it mid-message (explaining the contract, say) has not finished.
+func TestScanDoneSentinel_OnlyFinalLine(t *testing.T) {
+	if _, ok := ScanDoneSentinel("I will end with:\n===AGENTDECK_DONE=== status=ok summary=x\nbut not yet."); ok {
+		t.Error("sentinel quoted mid-message must not count")
+	}
+	if sig, ok := ScanDoneSentinel("done\n===AGENTDECK_DONE=== status=ok summary=x\n\n"); !ok || sig.Summary != "x" {
+		t.Errorf("trailing blank lines must not hide the final sentinel: %+v %v", sig, ok)
+	}
+}
