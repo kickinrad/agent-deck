@@ -1199,6 +1199,7 @@ func main() {
 			defer stopWatch()
 			startHeadlessAutoInstall(watchCtx)
 			startHeadlessSelfRestart(watchCtx, server.Idle)
+			ui.StartHeadlessWatchers(watchCtx, profile)
 			if err := server.Start(); err != nil {
 				logging.ForComponent(logging.CompWeb).Error("web_server_error",
 					slog.String("error", err.Error()))

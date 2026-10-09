@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -4162,10 +4163,53 @@ func (h *Home) startWatcherEngine() tea.Cmd {
 	if db == nil {
 		return nil
 	}
+	if !acquireWatcherHostLock() {
+		uiLog.Info("watcher_engine_hosted_elsewhere")
+		return nil
+	}
+	eng, rows := buildWatcherEngine(db, h.profile)
+	if eng == nil {
+		return nil
+	}
+	if err := eng.Start(); err != nil {
+		uiLog.Warn("watcher_engine_start_failed", "error", err.Error())
+		return nil
+	}
+	h.watcherEngine = eng
+	h.firstWatcherEventOnce = sync.Once{}
 
+	uiLog.Info("watcher_engine_started",
+		slog.Int("watcher_count", len(rows)),
+		slog.Int("running_count", runningCount(rows)))
+
+	return tea.Batch(
+		listenForWatcherEvent(eng.EventCh()),
+		listenForWatcherHealth(eng.HealthCh()),
+	)
+}
+
+// runningCount returns how many watcher rows are in the "running" state.
+func runningCount(rows []*statedb.WatcherRow) int {
+	n := 0
+	for _, r := range rows {
+		if r != nil && r.Status == "running" {
+			n++
+		}
+	}
+	return n
+}
+
+// loadWatcherSourceSettings reads the [source] table from
+// ~/.agent-deck/watcher/<name>/watcher.toml into a map[string]string suitable for
+// AdapterConfig.Settings. Returns an empty (non-nil) map on any error so the engine
+// falls back to per-adapter defaults instead of failing to register.
+// buildWatcherEngine registers every watcher marked running as an adapter and returns the
+// engine, or nil when there is nothing to host. rows is the table it was built from, so a
+// host can tell when the set changes.
+func buildWatcherEngine(db *statedb.StateDB, profile string) (*watcher.Engine, []*statedb.WatcherRow) {
 	rows, err := db.LoadWatchers()
 	if err != nil || len(rows) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Load user config for watcher settings.
@@ -4216,39 +4260,118 @@ func (h *Home) startWatcherEngine() tea.Cmd {
 		eng.RegisterAdapter(row.ID, adapter, adapterCfg, maxSilenceMinutes)
 	}
 
-	if err := eng.Start(); err != nil {
-		uiLog.Warn("watcher_engine_start_failed", "error", err.Error())
-		return nil
-	}
-
-	h.watcherEngine = eng
-	h.firstWatcherEventOnce = sync.Once{}
-
-	uiLog.Info("watcher_engine_started",
-		slog.Int("watcher_count", len(rows)),
-		slog.Int("running_count", runningCount(rows)))
-
-	return tea.Batch(
-		listenForWatcherEvent(eng.EventCh()),
-		listenForWatcherHealth(eng.HealthCh()),
-	)
+	return eng, rows
 }
 
-// runningCount returns how many watcher rows are in the "running" state.
-func runningCount(rows []*statedb.WatcherRow) int {
-	n := 0
+// acquireWatcherHostLock claims the right to host the watcher engine for this machine:
+// the interactive TUI and `web --no-tui` both try, and only the first holds it. The lock
+// lives with the process and is released when it exits.
+func acquireWatcherHostLock() bool {
+	dir, err := session.WatcherDir()
+	if err != nil {
+		return false
+	}
+	_ = os.MkdirAll(dir, 0o700)
+	f, err := os.OpenFile(filepath.Join(dir, "engine.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		return false
+	}
+	watcherHostLock = f // kept open for the life of the process
+	return true
+}
+
+var watcherHostLock *os.File
+
+// watcherRowsKey is the running set a host was built from.
+func watcherRowsKey(rows []*statedb.WatcherRow) string {
+	var b strings.Builder
 	for _, r := range rows {
-		if r != nil && r.Status == "running" {
-			n++
+		if r.Status == "running" {
+			b.WriteString(r.ID)
+			b.WriteByte(';')
 		}
 	}
-	return n
+	return b.String()
 }
 
-// loadWatcherSourceSettings reads the [source] table from
-// ~/.agent-deck/watcher/<name>/watcher.toml into a map[string]string suitable for
-// AdapterConfig.Settings. Returns an empty (non-nil) map on any error so the engine
-// falls back to per-adapter defaults instead of failing to register.
+// StartHeadlessWatchers hosts the watcher engine in a process with no TUI (`web --no-tui`).
+// It takes the host lock, delivers routed events through the durable send queue, and
+// rebuilds the engine when the set of running watchers changes.
+func StartHeadlessWatchers(ctx context.Context, profile string) {
+	db := statedb.GetGlobal()
+	if db == nil || !acquireWatcherHostLock() {
+		return
+	}
+	go func() {
+		var eng *watcher.Engine
+		key := ""
+		rescan := time.NewTicker(time.Minute)
+		defer rescan.Stop()
+		for {
+			if eng == nil {
+				e, rows := buildWatcherEngine(db, profile)
+				if e != nil {
+					if err := e.Start(); err != nil {
+						uiLog.Warn("watcher_engine_start_failed", "error", err.Error())
+					} else {
+						eng, key = e, watcherRowsKey(rows)
+						uiLog.Info("watcher_engine_started_headless", slog.Int("running_count", runningCount(rows)))
+					}
+				}
+			}
+			var events <-chan watcher.Event
+			if eng != nil {
+				events = eng.EventCh()
+			}
+			select {
+			case <-ctx.Done():
+				if eng != nil {
+					eng.Stop()
+				}
+				return
+			case evt := <-events:
+				queueWatcherEvent(profile, evt)
+			case <-rescan.C:
+				rows, err := db.LoadWatchers()
+				if err != nil || watcherRowsKey(rows) == key {
+					continue
+				}
+				if eng != nil {
+					eng.Stop()
+					eng = nil
+				}
+			}
+		}
+	}()
+}
+
+// queueWatcherEvent hands a routed event to the conductor through `session send --queue`,
+// the durable path, instead of raw keystrokes into its pane.
+func queueWatcherEvent(profile string, evt watcher.Event) {
+	if evt.RoutedTo == "" || evt.RoutedTo == "triage" || strings.HasPrefix(evt.RoutedTo, "triage-") {
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	args := []string{"session", "send", session.ConductorSessionTitle(evt.RoutedTo), formatWatcherDispatchMsg(evt), "--queue", "-q"}
+	if profile != "" {
+		args = append([]string{"-p", profile}, args...)
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		uiLog.Warn("dispatch_watcher_event_queue_failed", slog.String("error", err.Error()))
+		return
+	}
+	_ = cmd.Process.Release()
+}
+
 func loadWatcherSourceSettings(name string) map[string]string {
 	out := map[string]string{}
 	dir, err := session.WatcherNameDir(name)
@@ -13833,32 +13956,7 @@ func formatWatcherDispatchMsg(evt watcher.Event) string {
 // concrete delivery target yet. Mirrors dispatchHealthAlert: looks up the conductor session
 // by title and uses tmux send-keys (T-16-08) to deliver the formatted line.
 func (h *Home) dispatchWatcherEvent(evt watcher.Event) {
-	if evt.RoutedTo == "" || evt.RoutedTo == "triage" || strings.HasPrefix(evt.RoutedTo, "triage-") {
-		return
-	}
-	msg := formatWatcherDispatchMsg(evt)
-	sessionTitle := session.ConductorSessionTitle(evt.RoutedTo)
-	h.instancesMu.RLock()
-	instances := h.instances
-	h.instancesMu.RUnlock()
-	for _, inst := range instances {
-		if inst.Title != sessionTitle {
-			continue
-		}
-		ts := inst.GetTmuxSession()
-		if ts == nil || ts.Name == "" {
-			return
-		}
-		tmuxName := ts.Name
-		go func() {
-			if err := deliverToConductorPane(ts, msg); err != nil {
-				uiLog.Warn("dispatch_watcher_event_send_failed",
-					slog.String("tmux_session", tmuxName),
-					slog.String("error", err.Error()))
-			}
-		}()
-		return
-	}
+	queueWatcherEvent(h.profile, evt)
 }
 
 // deliverToConductorPane sends msg into a conductor's tmux pane and verifies it
