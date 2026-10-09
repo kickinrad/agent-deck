@@ -758,6 +758,14 @@ func ResolveSession(identifier string, instances []*session.Instance) (*session.
 			titleMatches = append(titleMatches, inst)
 		}
 	}
+	// A conductor is addressed by its bare name: `argus` finds `conductor-argus`.
+	if len(titleMatches) == 0 {
+		for _, inst := range instances {
+			if inst.Title == session.ConductorSessionTitle(identifier) {
+				titleMatches = append(titleMatches, inst)
+			}
+		}
+	}
 	if len(titleMatches) == 1 {
 		return titleMatches[0], "", ""
 	}

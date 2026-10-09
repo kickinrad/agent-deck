@@ -5925,7 +5925,8 @@ func displaySessionTitle(inst *session.Instance, _ string) string {
 // background UpdateStatus writer (#1753; see the field comments on
 // sessionRenderState). The overview row renderer must use this form.
 func displaySessionTitleFromState(state sessionRenderState) string {
-	return state.title
+	// Conductors are shown by their bare name; the title keeps its prefix as the identity.
+	return strings.TrimPrefix(state.title, session.ConductorSessionTitlePrefix)
 }
 
 // sessionDisplayLabels keeps the session name first, with a useful pane or
