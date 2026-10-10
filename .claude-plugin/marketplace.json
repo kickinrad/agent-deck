@@ -21,6 +21,11 @@
         "./skills/deck-retro",
         "./skills/deck-repro"
       ]
+    },
+    {
+      "name": "deck",
+      "description": "Agent Deck sessions as native Claude Code agents (deck:<session>, deck:new)",
+      "source": "./claude/deck"
     }
   ]
 }
