@@ -1,0 +1,8 @@
+{
+  "name": "deck",
+  "version": "0.1.0",
+  "description": "Agent Deck sessions as native Claude Code agents: deck:<session> messages a live session, deck:new starts one; the reply is the agent's answer.",
+  "author": {
+    "name": "kickinrad"
+  }
+}
