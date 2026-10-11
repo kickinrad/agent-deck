@@ -11,6 +11,10 @@ const NEW = 'new'
 const REFRESH_MS = 15_000
 const SEND_TIMEOUT = '30m'
 const READY_SECONDS = 120
+// Which sessions become agent types: the `sessions` option, titles or globs.
+let offered: RegExp[] = [/^.*$/]
+const globs = (spec: string) => spec.split(/\s+/).filter(Boolean)
+  .map((g) => new RegExp(`^${g.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`))
 const slug = (title: string) => title.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 64)
 
 type Session = { id: string; title: string; status: string }
@@ -39,6 +43,7 @@ async function refresh($: any, types: Map<string, string>): Promise<void> {
   for (const s of JSON.parse(listed.stdout) as Session[]) {
     const name = slug(s.title)
     if (s.id === self || s.status === 'stopped' || name === NEW || types.has(name)) continue
+    if (!offered.some((g) => g.test(s.title))) continue
     await $.agent.register({ name, description: `Message the live Agent Deck session '${s.title}' and return its reply.`,
       prompt: 'Answered by Agent Deck.', model: 'haiku', tools: [], omitClaudeMd: true })
     types.set(name, s.title)
@@ -91,7 +96,8 @@ async function sync($: any): Promise<void> {
   try { await refresh($, types) } catch {} // a missing or failing agent-deck leaves the types as they were
 }
 
-export const register: Register = (on) => {
+export const register: Register = (on, options) => {
+  offered = globs(String((options as { sessions?: string })?.sessions ?? '*'))
   on('session.start', async ($, e, next) => {
     const done = await next(e)
     await sync($)
