@@ -23,11 +23,20 @@ type Step = { turnId: string; index: number }
 // A teammate's first message arrives in its team envelope; the session gets the brief alone.
 const unwrap = (text: string) => text.match(/^\s*<teammate-message[^>]*>\s*([\s\S]*?)\s*<\/teammate-message>\s*$/)?.[1] ?? text
 
-// One answer: the reply text, then the stop that ends the agent's only step.
+// One answer: the reply as text and as a SubagentHandback call, then the stop that ends the agent's step.
+// Under auto mode only the hand-back reaches the caller, through its review; elsewhere the text does.
+const HANDBACK = 'SubagentHandback'
 async function* answer(e: Step, text: string) {
-  if (text) yield { kind: 'text' as const, index: 0, text }
-  yield { kind: 'stop' as const, stopReason: 'end_turn' as const, usage: null }
-  return { turnId: e.turnId, index: e.index, answer: text, toolUses: [], stopReason: 'end_turn' as const, usage: null }
+  if (!text) {
+    yield { kind: 'stop' as const, stopReason: 'end_turn' as const, usage: null }
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage: null }
+  }
+  const input = { message: text }
+  yield { kind: 'text' as const, index: 0, text }
+  yield { kind: 'tool' as const, index: 1, id: `toolu_deck_${e.turnId}_${e.index}`, name: HANDBACK }
+  yield { kind: 'input' as const, index: 1, json: JSON.stringify(input) }
+  yield { kind: 'stop' as const, stopReason: 'tool_use' as const, usage: null }
+  return { turnId: e.turnId, index: e.index, answer: text, toolUses: [{ name: HANDBACK, input }], stopReason: 'tool_use' as const, usage: null }
 }
 
 // Registers a type for each live session not yet known; the current session is never its own agent.
