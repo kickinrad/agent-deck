@@ -37,7 +37,12 @@ import (
 // can die without a transcript marker (stopped from the /tasks UI, a killed
 // Claude process), and a held light must never turn into a stuck one. The
 // transcript also VETOES a stale pane row: a workflow row whose task has
-// already reported a terminal status is history.
+// already reported a terminal status is history, and so is a "Waiting for N
+// background agents / dynamic workflows" line the transcript no longer backs
+// (no pending launch of that kind, and no turn count fresher than the hold).
+// Claude Code can leave that line, and the pending count under it, behind
+// after the work is gone; the pane keeps redrawing it, so without the veto
+// the session would stay running for as long as the pane is left open.
 //
 // Precedence with the hook (documented in docs/status-detection.md): the
 // Stop hook writes "waiting" at the end of EVERY foreground turn, including the
@@ -354,6 +359,10 @@ func mergeBackgroundWork(pane tmux.BackgroundWork, sc transcriptBackgroundScan, 
 		// The row outlived its workflow: the task already reported back.
 		pane = tmux.BackgroundWork{}
 	}
+	if pane.InFlight() && scOK && pane.Steps == 0 && sc.awaitedLineStale(pane.Kind, now) {
+		// The Waiting line outlived its work: nothing in the transcript backs it.
+		pane = tmux.BackgroundWork{}
+	}
 	if scOK {
 		tx, at := sc.inFlight()
 		if pane.Watching() && tx.Running() && now.Sub(at) <= backgroundTranscriptHold {
@@ -429,6 +438,29 @@ func (sc transcriptBackgroundScan) passiveShellCount(summary string, now time.Ti
 		return shells + monitors
 	}
 	return 0
+}
+
+// awaitedLineStale reports whether a "Waiting for N … to finish" line of
+// kind (agent or workflow) has no transcript evidence behind it: no pending
+// launch of that kind, and the turn's pending count is zero or older than
+// backgroundTranscriptHold. Shell and monitor counters sit on the footer,
+// which Claude redraws live, so they are never stale this way.
+func (sc transcriptBackgroundScan) awaitedLineStale(kind string, now time.Time) bool {
+	var count int
+	switch kind {
+	case tmux.BackgroundKindAgent:
+		count = sc.TurnAgents
+	case tmux.BackgroundKindWorkflow:
+		count = sc.TurnWorkflows
+	default:
+		return false
+	}
+	for _, t := range sc.Pending {
+		if t.Kind == kind {
+			return false
+		}
+	}
+	return count == 0 || now.Sub(sc.TurnAt) > backgroundTranscriptHold
 }
 
 func (sc transcriptBackgroundScan) pendingNamed(kind, name string) bool {

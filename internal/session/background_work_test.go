@@ -126,6 +126,13 @@ func TestMergeBackgroundWork(t *testing.T) {
 	finished := scanTranscriptBackground(lines)
 	shells := scanTranscriptBackground(restamp(lines[:34], now.Add(-20*time.Second)))
 	row := tmux.BackgroundWork{Kind: tmux.BackgroundKindWorkflow, Task: "probe-two-agents", Step: 1, Steps: 2, Elapsed: "22s", Source: "pane"}
+	awaiting := tmux.BackgroundWork{Kind: tmux.BackgroundKindAgent, Task: "1 background agent", Source: "pane"}
+	agentPending := transcriptBackgroundScan{Pending: []transcriptBackgroundTask{{ID: "a1", Kind: tmux.BackgroundKindAgent, Name: "probe agent", At: now.Add(-time.Hour)}}}
+	// Claude Code left pendingBackgroundAgentCount: 1 on the turn_duration
+	// record with no launch behind it (field report: a conductor held running
+	// for a day by its pane's Waiting line).
+	orphanCount := transcriptBackgroundScan{TurnAgents: 1, TurnAt: now.Add(-10 * time.Minute)}
+	freshCount := transcriptBackgroundScan{TurnAgents: 1, TurnAt: now.Add(-30 * time.Second)}
 
 	cases := []struct {
 		name     string
@@ -145,6 +152,14 @@ func TestMergeBackgroundWork(t *testing.T) {
 		{"recent pane sighting extends the hold", tmux.BackgroundWork{}, staleWF, true, now.Add(-time.Minute), tmux.BackgroundKindWorkflow, "probe-two-agents", false},
 		{"footer counter named from transcript", tmux.BackgroundWork{Kind: tmux.BackgroundKindBash, Task: "1 shell", Source: "pane"}, shells, true, time.Time{}, tmux.BackgroundKindBash, "Sleep for 50 seconds in background", true},
 		{"nothing anywhere", tmux.BackgroundWork{}, finished, true, time.Time{}, "", "", false},
+		{"Waiting line alone", awaiting, transcriptBackgroundScan{}, false, time.Time{}, tmux.BackgroundKindAgent, "1 background agent", true},
+		{"Waiting line, agent launch pending", awaiting, agentPending, true, time.Time{}, tmux.BackgroundKindAgent, "probe agent", true},
+		{"Waiting line, fresh turn count", awaiting, freshCount, true, time.Time{}, tmux.BackgroundKindAgent, "1 background agent", true},
+		{"stale Waiting line vetoed by orphaned count", awaiting, orphanCount, true, now.Add(-5 * time.Minute), "", "", false},
+		// The veto stops the pane sightings, so the last one still bounds the hold.
+		{"vetoed Waiting line, last sighting holds", awaiting, orphanCount, true, now.Add(-time.Minute), tmux.BackgroundKindAgent, "", false},
+		{"stale Waiting line vetoed by finished transcript", awaiting, finished, true, now, "", "", false},
+		{"stale workflow Waiting line vetoed", tmux.BackgroundWork{Kind: tmux.BackgroundKindWorkflow, Task: "1 dynamic workflow", Source: "pane"}, finished, true, now, "", "", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
