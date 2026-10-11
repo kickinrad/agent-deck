@@ -70,9 +70,9 @@ async function send($: any, session: string, brief: string): Promise<string> {
   return `agent-deck: ${session}: ${why || (end.code === 0 ? `finished without a text reply (${out.trim().slice(0, 160) || 'no output'})` : `send exited ${end.code}`)}`
 }
 
-// Starts a session in the working directory and waits until it can take a message; its id, or why not.
+// Starts a Claude session in the working directory and waits until it can take a message; its id, or why not.
 async function launch($: any): Promise<{ id?: string; why?: string }> {
-  const made = await $.process.run(['agent-deck', 'launch', await $.session.cwd(), '--json', '--no-parent'], { timeoutMs: 60_000 })
+  const made = await $.process.run(['agent-deck', 'launch', await $.session.cwd(), '-c', 'claude', '--json', '--no-parent'], { timeoutMs: 60_000 })
   let id: string | undefined
   try { const j = JSON.parse(made.stdout); id = j.id ?? j.session?.id ?? j.session_id } catch {}
   if (made.exitCode !== 0 || !id) return { why: String(made.stderr).trim().split('\n').at(-1) || 'launch failed' }

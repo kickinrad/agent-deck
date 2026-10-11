@@ -13,10 +13,11 @@ type Spawned = { argv: readonly string[]; input?: string }
 function standIns(on: any, opts: { type?: string; brief?: string; send?: { code: number; out: string; err?: string } } = {}) {
   const registered: string[] = []
   const spawned: Spawned[] = []
+  const ran_: (readonly string[])[] = []
   mock.clock(on)
   on('env.get', (_$: any, e: any) => ({ value: e.name === 'AGENTDECK_INSTANCE_ID' ? 'self-1' : '/home/test' }))
   on('session.cwd', () => ({ value: '/home/test/p' }))
-  on('process.run', (_$: any, e: any) => ({
+  on('process.run', (_$: any, e: any) => (ran_.push(e.argv), {
     value: e.argv[1] === 'list' ? ran(0, JSON.stringify(SESSIONS)) : e.argv[1] === 'launch' ? ran(0, JSON.stringify({ id: 'n-1' })) : ran(0),
   }))
   on('process.spawn', async function* (_$: any, e: any) {
@@ -36,7 +37,7 @@ function standIns(on: any, opts: { type?: string; brief?: string; send?: { code:
     yield { kind: 'stop', stopReason: 'end_turn', usage: null }
     return { turnId: 't', index: 0, answer: 'from the model', toolUses: [], stopReason: 'end_turn', usage: null }
   })
-  return { registered, spawned }
+  return { registered, spawned, ran: ran_ }
 }
 
 async function step($: any, index = 0) {
@@ -83,9 +84,10 @@ test('a further step ends the turn without asking anyone', async ($, on) => {
 })
 
 test('new starts a session, waits until it is ready, then sends the brief', async ($, on) => {
-  const { spawned } = standIns(on, { type: 'deck:new' })
+  const { spawned, ran: runs } = standIns(on, { type: 'deck:new' })
   const { text } = await step($)
   expect(text).toBe('Halloumi bake tonight.')
+  expect(runs.find((a) => a[1] === 'launch')).toEqual(expect.arrayContaining(['-c', 'claude']))
   expect(spawned.map((s) => s.argv[0])).toEqual(['sh', 'agent-deck'])
   expect(spawned[1].argv[3]).toBe('n-1')
 })
