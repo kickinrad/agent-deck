@@ -95,3 +95,13 @@ test('a teammate brief loses its team envelope on the way to the session', async
   await step($)
   expect(spawned.find((s) => s.argv[1] === 'session')!.input).toBe('What is for dinner?')
 })
+
+test('a send that prints a notice before its JSON still yields the reply', async ($, on) => {
+  standIns(on, { send: { code: 0, out: 'note: socket transport\n' + JSON.stringify({ content: 'Gyudon.' }) } })
+  expect((await step($)).text).toBe('Gyudon.')
+})
+
+test('a send with no reply text says so and shows what came back', async ($, on) => {
+  standIns(on, { send: { code: 0, out: JSON.stringify({ success: true, content: '' }) } })
+  expect((await step($)).text).toContain('finished without a text reply')
+})
