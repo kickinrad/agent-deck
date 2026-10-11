@@ -57,7 +57,9 @@ test('a resident agent sends its brief and answers with the session reply', asyn
   await $.turn.start({ turnId: 't' } as any)
   const { text, chunks } = await step($)
   expect(text).toBe('Halloumi bake tonight.')
-  expect(chunks.at(-1)).toMatchObject({ kind: 'stop', stopReason: 'end_turn' })
+  expect(chunks.find((c) => c.kind === 'tool')).toMatchObject({ name: 'SubagentHandback' })
+  expect(JSON.parse(chunks.filter((c) => c.kind === 'input').map((c) => c.json).join(''))).toEqual({ message: 'Halloumi bake tonight.' })
+  expect(chunks.at(-1)).toMatchObject({ kind: 'stop', stopReason: 'tool_use' })
   const send = spawned.find((s) => s.argv[1] === 'session')!
   expect(send.argv.slice(0, 6)).toEqual(['agent-deck', 'session', 'send', 'julia', '--json', '--wait'])
   expect(send.input).toBe('What is for dinner?')
