@@ -10,7 +10,10 @@ package session
 // durable record is still present for the next-turn drain.
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -301,9 +304,28 @@ func TestDurableSessions_DigestNudgeDoesNotSwallowRetry(t *testing.T) {
 	}
 }
 
-// A conductor's pending urgent record is left to upstream's heartbeat and
-// outbox path: the retry never probes or wakes a conductor.
-func TestDurableSessions_RetryLeavesConductorsToUpstream(t *testing.T) {
+// writeConductorHeartbeat records conductor name's heartbeat setting under a
+// test data dir. Call it before the fixture: it moves XDG_DATA_HOME.
+func writeConductorHeartbeat(t *testing.T, name string, on bool) {
+	t.Helper()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "share"))
+	dir, err := ConductorNameDir(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(ConductorMeta{Name: name, Profile: "default", HeartbeatEnabled: on})
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A conductor whose heartbeat is on leaves its pending urgent record to
+// upstream's heartbeat and outbox path: the retry never probes or wakes it.
+func TestDurableSessions_RetryLeavesHeartbeatConductorsToUpstream(t *testing.T) {
+	writeConductorHeartbeat(t, "ops", true)
 	n, parentID, event := newWakeNudgeFixture(t)
 	spy := &wakeSpy{}
 	n.wake = spy.wiring()
@@ -311,7 +333,27 @@ func TestDurableSessions_RetryLeavesConductorsToUpstream(t *testing.T) {
 	spy.idle, spy.probes = true, 0
 	reconcileIdleTitled(n, event.Profile, parentID, "conductor-ops")
 	if spy.sent != 0 || spy.probes != 0 || unmarkedRecords(t, parentID) != 1 {
-		t.Fatalf("conductor retried: sent=%d probes=%d unmarked=%d", spy.sent, spy.probes, unmarkedRecords(t, parentID))
+		t.Fatalf("heartbeat conductor retried: sent=%d probes=%d unmarked=%d", spy.sent, spy.probes, unmarkedRecords(t, parentID))
+	}
+}
+
+// A conductor with its heartbeat off has nothing else to retry a withheld
+// wake (field report: a conductor held busy by a stale pane line never woke
+// for its child's urgent completion), so the retry wakes it once idle.
+func TestDurableSessions_RetryWakesConductorWithHeartbeatOff(t *testing.T) {
+	writeConductorHeartbeat(t, "ops", false)
+	n, parentID, event := newWakeNudgeFixture(t)
+	spy := &wakeSpy{}
+	n.wake = spy.wiring()
+	n.NotifyFinished(event)
+	if spy.sent != 0 || unmarkedRecords(t, parentID) != 1 {
+		t.Fatalf("busy conductor: sent=%d unmarked=%d, want 0 and 1", spy.sent, unmarkedRecords(t, parentID))
+	}
+	spy.idle = true
+	reconcileIdleTitled(n, event.Profile, parentID, "conductor-ops")
+	reconcileIdleTitled(n, event.Profile, parentID, "conductor-ops")
+	if spy.sent != 1 || unmarkedRecords(t, parentID) != 0 {
+		t.Fatalf("heartbeat-off conductor: sent=%d unmarked=%d, want 1 and 0", spy.sent, unmarkedRecords(t, parentID))
 	}
 }
 
