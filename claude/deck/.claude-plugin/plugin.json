@@ -4,5 +4,13 @@
   "description": "Agent Deck sessions as native Claude Code agents: deck:<session> messages a live session, deck:new starts one; the reply is the agent's answer.",
   "author": {
     "name": "kickinrad"
+  },
+  "userConfig": {
+    "sessions": {
+      "type": "string",
+      "title": "Sessions",
+      "description": "Space-separated Agent Deck session titles or globs (* matches any run) to offer as deck:<title> agents. Default: every live session.",
+      "default": "*"
+    }
   }
 }
