@@ -55,6 +55,7 @@ const HomeIsolationMarkerEnv = "AGENT_DECK_TEST_HOME_ISOLATED"
 //   - XDG_DATA_HOME    -> ""  (cleared; resolves under $HOME/.local/share)
 //   - XDG_CACHE_HOME   -> ""  (cleared; resolves under $HOME/.cache)
 //   - XDG_STATE_HOME   -> ""  (cleared; resolves under $HOME/.local/state)
+//   - CODEX_HOME       -> ""  (cleared; Codex config resolves under $HOME/.codex)
 //   - AGENTDECK_PROFILE -> _test
 //   - AGENT_DECK_TEST_HOME_ISOLATED -> 1  (marker for guard/runtime checks)
 //
@@ -84,6 +85,7 @@ func IsolateHome() func() {
 		"XDG_DATA_HOME",
 		"XDG_CACHE_HOME",
 		"XDG_STATE_HOME",
+		"CODEX_HOME",
 		"AGENTDECK_PROFILE",
 		HomeIsolationMarkerEnv,
 	}
@@ -111,6 +113,10 @@ func IsolateHome() func() {
 	_ = os.Unsetenv("XDG_DATA_HOME")
 	_ = os.Unsetenv("XDG_CACHE_HOME")
 	_ = os.Unsetenv("XDG_STATE_HOME")
+	// A developer's exported CODEX_HOME names their live Codex config: the
+	// conductor-setup and workspace-trust tests would seed trusted projects
+	// and MCP servers into it.
+	_ = os.Unsetenv("CODEX_HOME")
 	_ = os.Setenv("AGENTDECK_PROFILE", "_test")
 	_ = os.Setenv(HomeIsolationMarkerEnv, "1")
 
