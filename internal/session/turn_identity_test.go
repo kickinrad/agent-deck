@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -79,6 +80,39 @@ func TestTurnIdentity_InterleavedSendsReturnOwnNonce(t *testing.T) {
 		if got.text != want[got.i] {
 			t.Errorf("send %d returned %q, want %q", got.i, got.text, want[got.i])
 		}
+	}
+}
+
+// A socket send lands as a peer turn: Claude wraps the prompt in its own
+// envelope and stamps the send's msg_id on origin (record shape from Claude
+// Code 2.1.288). The text never matches, so --wait blocked until its timeout
+// after the reply had landed; the msg_id binds the turn.
+func TestAwaitTurnIdentity_SocketPeerTurnMatchesMsgID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	lines := []string{
+		`{"type":"queue-operation","operation":"enqueue","content":"Reply with exactly: socket-ok"}`,
+		`{"type":"user","isSidechain":false,"isMeta":true,"uuid":"peer-user","sessionId":"s1","message":{"role":"user","content":"Another Claude session sent a message:\nReply with exactly: socket-ok\n\nThis came from another Claude session."},"origin":{"kind":"peer","from":"unknown","msg_id":"d95d8e8d"}}`,
+		`{"type":"assistant","uuid":"a1","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"socket-ok"}],"stop_reason":"end_turn"}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	q := TurnQuery{Path: path, Prompt: "Reply with exactly: socket-ok"}
+	if _, err := AwaitTurnIdentity(q, 50*time.Millisecond, time.Millisecond); err == nil {
+		t.Fatal("prompt text alone matched the peer envelope; the msg_id is what binds it")
+	}
+	q.MsgID = "other-send"
+	if _, err := AwaitTurnIdentity(q, 50*time.Millisecond, time.Millisecond); err == nil {
+		t.Fatal("another send's msg_id bound this turn")
+	}
+	q.MsgID = "d95d8e8d"
+	id, err := AwaitTurnIdentity(q, time.Second, time.Millisecond)
+	if err != nil || id.UUID != "peer-user" {
+		t.Fatalf("identity = %+v, %v; want peer-user", id, err)
+	}
+	resp, err := AwaitTurnResponse(id, time.Second, time.Millisecond)
+	if err != nil || resp.Content != "socket-ok" {
+		t.Fatalf("reply = %+v, %v; want socket-ok", resp, err)
 	}
 }
 
