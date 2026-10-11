@@ -812,7 +812,9 @@ func (d *TransitionDaemon) journalWriter(profile string) *health.AsyncWriter {
 // observes the parent idle. Such a record committed while its parent was busy
 // otherwise waits for the parent's next turn: a Codex parent has no Stop-hook
 // drain, and a Claude parent can go idle between its Stop drain and the
-// commit. Conductors keep upstream's heartbeat and outbox path. One reserved
+// commit. A conductor with its heartbeat on keeps upstream's heartbeat and
+// outbox path; one with the heartbeat off has no other retry, so it is
+// reconciled like any other parent. One reserved
 // wake per parent per pass; the reservation covers every pending record it
 // marks, survives a daemon restart, and is never resubmitted.
 func (d *TransitionDaemon) reconcilePendingInboxWakes(profile string, byID map[string]*Instance, statuses map[string]string) {
@@ -827,7 +829,7 @@ func (d *TransitionDaemon) reconcilePendingInboxWakes(profile string, byID map[s
 	}
 	for parentID := range parents {
 		parent := byID[parentID]
-		if parent == nil || isConductorSessionTitle(parent.Title) {
+		if parent == nil {
 			continue
 		}
 		// Screen on the status this pass already observed. The wake itself
@@ -838,7 +840,7 @@ func (d *TransitionDaemon) reconcilePendingInboxWakes(profile string, byID map[s
 		default:
 			continue
 		}
-		if !InboxHasPending(parentID) {
+		if !InboxHasPending(parentID) || conductorHeartbeatOn(parent.Title) {
 			continue
 		}
 		events, err := ReadInboxEvents(parentID)
@@ -861,6 +863,17 @@ func (d *TransitionDaemon) reconcilePendingInboxWakes(profile string, byID map[s
 			break
 		}
 	}
+}
+
+// conductorHeartbeatOn reports whether title names a conductor whose
+// heartbeat retries its pending wakes. Unreadable metadata counts as on, so
+// the retry never doubles a heartbeat it cannot see.
+func conductorHeartbeatOn(title string) bool {
+	if !isConductorSessionTitle(title) {
+		return false
+	}
+	meta, err := LoadConductorMeta(strings.TrimPrefix(strings.TrimSpace(title), "conductor-"))
+	return err != nil || meta.HeartbeatEnabled
 }
 
 // turnBaseline returns the per-instance completed-turn map for profile,
