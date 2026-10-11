@@ -10,7 +10,7 @@ const SESSIONS = [
 type Spawned = { argv: readonly string[]; input?: string }
 
 // Agent Deck and the engine beneath the plugin: `send` is what `session send --json --wait` prints and how it exits.
-function standIns(on: any, opts: { type?: string; send?: { code: number; out: string; err?: string } } = {}) {
+function standIns(on: any, opts: { type?: string; brief?: string; send?: { code: number; out: string; err?: string } } = {}) {
   const registered: string[] = []
   const spawned: Spawned[] = []
   mock.clock(on)
@@ -29,7 +29,7 @@ function standIns(on: any, opts: { type?: string; send?: { code: number; out: st
   })
   on('agent.register', (_$: any, e: any) => { registered.push(e.name); return { value: { agent: `deck:${e.name}` } } })
   on('agent.list', () => ({ value: [{ id: 'ag-1', type: opts.type ?? 'deck:julia', description: 'd', status: 'running' }] }))
-  on('session.messages', () => ({ value: [{ role: 'user', text: 'What is for dinner?', toolUses: [] }] }))
+  on('session.messages', () => ({ value: [{ role: 'user', text: opts.brief ?? 'What is for dinner?', toolUses: [] }] }))
   on('turn.start', () => ({ turnId: 't' }))
   on('turn.step', async function* () {
     yield { kind: 'text', index: 0, text: 'from the model' }
@@ -88,4 +88,10 @@ test('new starts a session, waits until it is ready, then sends the brief', asyn
   expect(text).toBe('Halloumi bake tonight.')
   expect(spawned.map((s) => s.argv[0])).toEqual(['sh', 'agent-deck'])
   expect(spawned[1].argv[3]).toBe('n-1')
+})
+
+test('a teammate brief loses its team envelope on the way to the session', async ($, on) => {
+  const { spawned } = standIns(on, { brief: '<teammate-message teammate_id="lead" summary="s">\nWhat is for dinner?\n</teammate-message>' })
+  await step($)
+  expect(spawned.find((s) => s.argv[1] === 'session')!.input).toBe('What is for dinner?')
 })

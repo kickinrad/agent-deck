@@ -16,6 +16,9 @@ const slug = (title: string) => title.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 6
 type Session = { id: string; title: string; status: string }
 type Step = { turnId: string; index: number }
 
+// A teammate's first message arrives in its team envelope; the session gets the brief alone.
+const unwrap = (text: string) => text.match(/^\s*<teammate-message[^>]*>\s*([\s\S]*?)\s*<\/teammate-message>\s*$/)?.[1] ?? text
+
 // One answer: the reply text, then the stop that ends the agent's only step.
 async function* answer(e: Step, text: string) {
   if (text) yield { kind: 'text' as const, index: 0, text }
@@ -108,7 +111,8 @@ export const register: Register = (on) => {
     if (!name) return yield* next(e)
     // The reply is the whole answer; a further step would reach the placeholder model.
     if (e.index > 0) return yield* answer(e, '')
-    const brief = (await $.session.messages({ agentId: e.agentId }))?.find((m: { role: string }) => m.role === 'user')?.text ?? ''
+    const first = (await $.session.messages({ agentId: e.agentId }))?.find((m: { role: string }) => m.role === 'user')?.text ?? ''
+    const brief = unwrap(first)
     if (name === NEW) {
       const made = await launch($)
       return yield* answer(e, made.id ? await send($, made.id, brief) : `agent-deck: new session: ${made.why}`)
