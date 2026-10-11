@@ -105,3 +105,15 @@ test('a send with no reply text says so and shows what came back', async ($, on)
   standIns(on, { send: { code: 0, out: JSON.stringify({ success: true, content: '' }) } })
   expect((await step($)).text).toContain('finished without a text reply')
 })
+
+test('only sessions the sessions option names become agent types', { options: { sessions: 'conductor-* julia' } }, async ($, on) => {
+  const { registered } = standIns(on)
+  await $.turn.start({ turnId: 't' } as any)
+  expect(registered.sort()).toEqual(['conductor-piper', 'julia', 'new'])
+})
+
+test('a session outside the option is never offered', { options: { sessions: 'julia' } }, async ($, on) => {
+  const { registered } = standIns(on)
+  await $.turn.start({ turnId: 't' } as any)
+  expect(registered.sort()).toEqual(['julia', 'new'])
+})
