@@ -35,9 +35,14 @@ type TurnIdentity struct {
 // or malformed timestamp is rejected rather than trusted. Heartbeats, inbox
 // nudges and retries resend identical text, so the older copy of the same
 // prompt must never become this send's identity (PR #2043 round 2, #1978).
+//
+// MsgID is the msg_id of a socket send. Claude records a socket message as a
+// peer turn whose body wraps the prompt in its own envelope, so the text never
+// matches; the record's origin.msg_id does.
 type TurnQuery struct {
 	Path      string
 	Prompt    string
+	MsgID     string
 	Cursor    int64
 	NotBefore time.Time
 }
@@ -74,6 +79,9 @@ type turnRecord struct {
 	IsSidechain bool            `json:"isSidechain"`
 	SessionID   string          `json:"sessionId"`
 	Message     json.RawMessage `json:"message"`
+	Origin      struct {
+		MsgID string `json:"msg_id"`
+	} `json:"origin"`
 }
 
 type turnMessage struct {
@@ -187,7 +195,8 @@ func scanTurnIdentity(q TurnQuery, cursor int64) (TurnIdentity, int64, bool, err
 			continue
 		}
 		body, human := humanPrompt(rec)
-		if !human || !promptMatches(body, want) || recordTooOld(rec, q.NotBefore) {
+		sent := promptMatches(body, want) || (q.MsgID != "" && rec.Origin.MsgID == q.MsgID)
+		if !human || !sent || recordTooOld(rec, q.NotBefore) {
 			continue
 		}
 		if rec.UUID == "" {

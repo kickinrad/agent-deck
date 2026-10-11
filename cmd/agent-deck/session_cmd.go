@@ -3753,7 +3753,7 @@ func handleSessionSend(profile string, args []string) {
 				failSessionSend(out, *stream, err.Error(), recordSendEventOnce)
 			}
 		}
-		turnQuery = session.TurnQuery{Path: turnPath, Prompt: message, Cursor: turnCursor}
+		turnQuery = session.TurnQuery{Path: turnPath, Prompt: message, MsgID: sendRes.socketMsgID, Cursor: turnCursor}
 		if !pathKnownBeforeSend {
 			turnQuery.NotBefore = sentAt
 		}
