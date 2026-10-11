@@ -56,10 +56,13 @@ async function send($: any, session: string, brief: string): Promise<string> {
     if (step.done) { end = step.value ?? end; break }
     if (step.value.stream === 'stdout') out += step.value.text; else err += step.value.text
   }
+  // The payload is one JSON object; read the last line that parses, in case anything printed before it.
   let reply: { content?: string; error?: string } = {}
-  try { reply = JSON.parse(out) } catch {}
-  if (end.code === 0 && reply.content) return reply.content
-  return `agent-deck: ${session}: ${reply.error ?? (err.trim().split('\n').at(-1) || `send exited ${end.code}`)}`
+  for (const line of out.trim().split('\n').reverse()) { try { reply = JSON.parse(line); break } catch {} }
+  if (!reply.content && !reply.error) try { reply = JSON.parse(out) } catch {}
+  if (end.code === 0 && reply.content?.trim()) return reply.content
+  const why = reply.error ?? err.trim().split('\n').at(-1) ?? ''
+  return `agent-deck: ${session}: ${why || (end.code === 0 ? `finished without a text reply (${out.trim().slice(0, 160) || 'no output'})` : `send exited ${end.code}`)}`
 }
 
 // Starts a session in the working directory and waits until it can take a message; its id, or why not.
