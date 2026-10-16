@@ -24,7 +24,7 @@ enabled = true
 daily_limit = 10
 weekly_limit = 20
 monthly_limit = 30
-[costs.budgets.groups.my-sessions]
+[costs.budgets.groups.sessions]
 daily_limit = 5
 [costs.budgets.sessions.golden-sess-1]
 total_limit = 100
