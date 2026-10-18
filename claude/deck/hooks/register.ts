@@ -11,6 +11,14 @@ const NEW = 'new'
 const REFRESH_MS = 15_000
 const SEND_TIMEOUT = '30m'
 const READY_SECONDS = 120
+// A silent step is killed by the 600s stall watchdog, so the send beats on stderr while it waits.
+// `<&0`: bash gives a background job /dev/null for stdin, and the brief arrives on stdin.
+// The beat's sleep stays off the pipes: the spawn ends when its pipes close, and the orphaned sleep would hold them up to 30s.
+const BEAT = '@@deck-beat'
+const BEAT_SECONDS = 30
+const withBeat = (argv: string[]) => ['bash', '-c',
+  `"$@" <&0 & p=$!; ( while sleep ${BEAT_SECONDS} >/dev/null 2>&1; do printf '${BEAT}\\n' >&2; done ) & b=$!; wait $p; c=$?; kill $b 2>/dev/null; exit $c`,
+  'bash', ...argv]
 // Which sessions become agent types: the `sessions` option, titles or globs.
 let offered: RegExp[] = [/^.*$/]
 const globs = (spec: string) => spec.split(/\s+/).filter(Boolean)
@@ -25,6 +33,7 @@ const unwrap = (text: string) => text.match(/^\s*<teammate-message[^>]*>\s*([\s\
 
 // One answer: the reply as text and as a SubagentHandback call, then the stop that ends the agent's step.
 // Under auto mode only the hand-back reaches the caller, through its review; elsewhere the text does.
+// Index 0 belongs to the heartbeat's thinking.
 const HANDBACK = 'SubagentHandback'
 async function* answer(e: Step, text: string) {
   if (!text) {
@@ -32,9 +41,9 @@ async function* answer(e: Step, text: string) {
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage: null }
   }
   const input = { message: text }
-  yield { kind: 'text' as const, index: 0, text }
-  yield { kind: 'tool' as const, index: 1, id: `toolu_deck_${e.turnId}_${e.index}`, name: HANDBACK }
-  yield { kind: 'input' as const, index: 1, json: JSON.stringify(input) }
+  yield { kind: 'text' as const, index: 1, text }
+  yield { kind: 'tool' as const, index: 2, id: `toolu_deck_${e.turnId}_${e.index}`, name: HANDBACK }
+  yield { kind: 'input' as const, index: 2, json: JSON.stringify(input) }
   yield { kind: 'stop' as const, stopReason: 'tool_use' as const, usage: null }
   return { turnId: e.turnId, index: e.index, answer: text, toolUses: [{ name: HANDBACK, input }], stopReason: 'tool_use' as const, usage: null }
 }
@@ -59,16 +68,23 @@ async function refresh($: any, types: Map<string, string>): Promise<void> {
   }
 }
 
-// Sends the brief and waits for the session's turn to end; the reply, or why there is none.
-async function send($: any, session: string, brief: string): Promise<string> {
+// Sends the brief and waits for the session's turn to end, thinking a beat while it waits; the reply, or why there is none.
+async function* send($: any, session: string, brief: string) {
   const argv = ['agent-deck', 'session', 'send', session, '--json', '--wait', '--defer-if-busy', '--no-tag', '--timeout', SEND_TIMEOUT, '--message-file', '-']
   let out = '', err = ''
   let end: { code: number | null } = { code: null }
-  const it = $.process.spawn({ argv, input: brief })[Symbol.asyncIterator]()
+  const startedAt = await $.clock.now()
+  const it = $.process.spawn({ argv: withBeat(argv), input: brief })[Symbol.asyncIterator]()
   for (;;) {
     const step = await it.next()
     if (step.done) { end = step.value ?? end; break }
-    if (step.value.stream === 'stdout') out += step.value.text; else err += step.value.text
+    const { stream, text } = step.value
+    if (stream === 'stdout') { out += text; continue }
+    if (text.includes(BEAT)) {
+      const waited = Math.round(((await $.clock.now()) - startedAt) / 60_000)
+      yield { kind: 'thinking' as const, index: 0, text: `${session} · waiting ${waited}m` }
+    }
+    err += text.split('\n').filter((l: string) => !l.includes(BEAT)).join('\n')
   }
   // The payload is one JSON object; read the last line that parses, in case anything printed before it.
   let reply: { content?: string; error?: string } = {}
@@ -133,8 +149,8 @@ export const register: Register = (on, options) => {
     const brief = unwrap(first)
     if (name === NEW) {
       const made = await launch($)
-      return yield* answer(e, made.id ? await send($, made.id, brief) : `agent-deck: new session: ${made.why}`)
+      return yield* answer(e, made.id ? yield* send($, made.id, brief) : `agent-deck: new session: ${made.why}`)
     }
-    return yield* answer(e, await send($, types.get(name) ?? name, brief))
+    return yield* answer(e, yield* send($, types.get(name) ?? name, brief))
   })
 }
