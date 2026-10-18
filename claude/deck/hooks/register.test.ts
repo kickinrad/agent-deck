@@ -8,9 +8,12 @@ const SESSIONS = [
   { id: 'f-1', title: 'flora', status: 'stopped' },
 ]
 type Spawned = { argv: readonly string[]; input?: string }
+// The agent-deck command a spawn runs, inside the heartbeat wrapper or not.
+const deck = (s: Spawned) => s.argv.slice(s.argv.indexOf('agent-deck'))
+const sent = (spawned: Spawned[]) => spawned.find((s) => deck(s)[1] === 'session')!
 
 // Agent Deck and the engine beneath the plugin: `send` is what `session send --json --wait` prints and how it exits.
-function standIns(on: any, opts: { type?: string; brief?: string; send?: { code: number; out: string; err?: string } } = {}) {
+function standIns(on: any, opts: { type?: string; brief?: string; send?: { code: number; out: string; err?: string; beats?: number } } = {}) {
   const registered: string[] = []
   const spawned: Spawned[] = []
   const ran_: (readonly string[])[] = []
@@ -26,6 +29,7 @@ function standIns(on: any, opts: { type?: string; brief?: string; send?: { code:
     const send = opts.send ?? { code: 0, out: JSON.stringify({ success: true, content: 'Halloumi bake tonight.' }) }
     if (send.out) yield { stream: 'stdout', text: send.out }
     if (send.err) yield { stream: 'stderr', text: send.err }
+    for (let i = 0; i < (send.beats ?? 0); i++) yield { stream: 'stderr', text: '@@deck-beat\n' }
     return { value: { code: send.code, signal: null } }
   })
   on('agent.register', (_$: any, e: any) => { registered.push(e.name); return { value: { agent: `deck:${e.name}` } } })
@@ -60,8 +64,8 @@ test('a resident agent sends its brief and answers with the session reply', asyn
   expect(chunks.find((c) => c.kind === 'tool')).toMatchObject({ name: 'SubagentHandback' })
   expect(JSON.parse(chunks.filter((c) => c.kind === 'input').map((c) => c.json).join(''))).toEqual({ message: 'Halloumi bake tonight.' })
   expect(chunks.at(-1)).toMatchObject({ kind: 'stop', stopReason: 'tool_use' })
-  const send = spawned.find((s) => s.argv[1] === 'session')!
-  expect(send.argv.slice(0, 6)).toEqual(['agent-deck', 'session', 'send', 'julia', '--json', '--wait'])
+  const send = sent(spawned)
+  expect(deck(send).slice(0, 6)).toEqual(['agent-deck', 'session', 'send', 'julia', '--json', '--wait'])
   expect(send.input).toBe('What is for dinner?')
 })
 
@@ -90,14 +94,14 @@ test('new starts a session, waits until it is ready, then sends the brief', asyn
   const { text } = await step($)
   expect(text).toBe('Halloumi bake tonight.')
   expect(runs.find((a) => a[1] === 'launch')).toEqual(expect.arrayContaining(['-c', 'claude']))
-  expect(spawned.map((s) => s.argv[0])).toEqual(['sh', 'agent-deck'])
-  expect(spawned[1].argv[3]).toBe('n-1')
+  expect(spawned[0].argv[0]).toBe('sh')
+  expect(deck(spawned[1])[3]).toBe('n-1')
 })
 
 test('a teammate brief loses its team envelope on the way to the session', async ($, on) => {
   const { spawned } = standIns(on, { brief: '<teammate-message teammate_id="lead" summary="s">\nWhat is for dinner?\n</teammate-message>' })
   await step($)
-  expect(spawned.find((s) => s.argv[1] === 'session')!.input).toBe('What is for dinner?')
+  expect(sent(spawned).input).toBe('What is for dinner?')
 })
 
 test('a send that prints a notice before its JSON still yields the reply', async ($, on) => {
@@ -120,4 +124,24 @@ test('a session outside the option is never offered', { options: { sessions: 'ju
   const { registered } = standIns(on)
   await $.turn.start({ turnId: 't' } as any)
   expect(registered.sort()).toEqual(['julia', 'new'])
+})
+
+test('a long send beats every 30s so the stall watchdog never fires', async ($, on) => {
+  const { spawned } = standIns(on, { send: { code: 0, out: JSON.stringify({ content: 'Still Halloumi.' }), beats: 2 } })
+  const { chunks, text } = await step($)
+  expect(sent(spawned).argv.slice(0, 2)).toEqual(['bash', '-c'])
+  expect(sent(spawned).argv[2]).toContain('sleep 30 >/dev/null 2>&1') // an orphaned sleep would hold stderr open
+  expect(sent(spawned).argv[2]).toContain('"$@" <&0 &') // the brief on stdin survives the backgrounding
+  const thinking = chunks.filter((c) => c.kind === 'thinking')
+  expect(thinking.length).toBe(2)
+  expect(thinking.every((c) => c.index === 0 && c.text.includes('julia'))).toBe(true)
+  expect(text).toBe('Still Halloumi.')
+  expect(chunks.find((c) => c.kind === 'text').index).toBe(1)
+  expect(chunks.find((c) => c.kind === 'tool').index).toBe(2)
+})
+
+test('beats never reach a failed send\'s reason', async ($, on) => {
+  standIns(on, { send: { code: 1, out: '', err: 'socket closed\n', beats: 1 } })
+  const { text } = await step($)
+  expect(text).toBe('agent-deck: julia: socket closed')
 })
