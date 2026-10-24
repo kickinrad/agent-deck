@@ -8,14 +8,10 @@
 # time at the release gate. That happened four times: it broke the
 # v1.9.49 / v1.9.50 / v1.9.51 / v1.9.53 releases.
 #
-# This workflow closes that gap by running the EXACT proven release-gate test
-# step (release.yml "Run tests") on every PR, so full-suite-only regressions
-# fail at PR time instead of blocking a release.
-#
-# Steel-thread parity: the toolchain setup, the zoxide dependency, the
-# PERF_BUDGET_MULTIPLIER env, and the gotestsum invocation are copied verbatim
-# from .github/workflows/release.yml. Keep them in lockstep — if the release
-# gate's test step changes, mirror it here.
+# This workflow closes that gap by running the full suite on every PR, so
+# full-suite-only regressions fail at PR time instead of blocking a release.
+# release.yml calls this same workflow as its test gate, so PRs and releases
+# run one suite and there is nothing to keep in lockstep.
 
 name: Go tests
 
@@ -25,6 +21,13 @@ on:
   # docs-only PRs, blocking their merge forever. The job instead short-circuits
   # cheaply when the diff touches nothing Go-related.
   pull_request:
+  # release.yml runs these same shards as its test gate.
+  workflow_call:
+    inputs:
+      shards_only:
+        description: Run only the shards and their gate; skip the comms matrix and native SSH jobs, which PRs don't require.
+        type: boolean
+        default: false
   push:
     branches:
       - main
@@ -66,7 +69,7 @@ jobs:
     # run red; the leg reports a warning in its summary instead.
     name: Comms matrix advisory
     needs: changes
-    if: needs.changes.outputs.go == 'true'
+    if: needs.changes.outputs.go == 'true' && !inputs.shards_only
     uses: ./.github/workflows/comms-matrix.yml
     with:
       advisory: true
@@ -104,8 +107,8 @@ jobs:
   # already runs every package in its own process, so a split changes
   # nothing about what each package sees; it only lets the heavy groups
   # (cmd, session, ui) run side by side instead of one after another.
-  # Every shard uses the exact release-gate invocation (same gotestsum
-  # flags, -race, 20m per-package timeout, PERF_BUDGET_MULTIPLIER).
+  # Every shard uses the same invocation (gotestsum flags, -race, 20m
+  # per-package timeout, PERF_BUDGET_MULTIPLIER).
   shard:
     name: Test shard (${{ matrix.shard.name }})
     needs: changes
@@ -115,8 +118,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # cmd/agent-deck alone takes ~9 min, so it is cut three ways by test
-        # name; the other groups fit one runner each.
+        # cmd/agent-deck alone takes ~9 min and internal/session ~15 min, so
+        # they are cut by test name; the other groups fit one runner each.
         shard:
           - name: cmd-a
             packages: ./cmd/...
@@ -127,8 +130,12 @@ jobs:
           - name: cmd-c
             packages: ./cmd/...
             run: '^Test[S-Z_a-z0-9]'
-          - name: session
+          - name: session-a
             packages: ./internal/session/...
+            run: '^Test[A-F]'
+          - name: session-b
+            packages: ./internal/session/...
+            run: '^Test[G-Z_a-z0-9]'
           - name: ui-web
             packages: ./internal/ui/... ./internal/web/... ./tests/...
           - name: rest
@@ -149,7 +156,7 @@ jobs:
           go-version-file: go.mod
 
       # tmux + zoxide back the session and quick-open picker tests that the
-      # suite exercises for real; mirror release.yml.
+      # suite exercises for real.
       - name: Install tmux and zoxide
         timeout-minutes: 5
         run: |
@@ -232,7 +239,7 @@ jobs:
   native-ssh:
     name: Required native SSH acceptance
     needs: changes
-    if: needs.changes.outputs.go == 'true'
+    if: needs.changes.outputs.go == 'true' && !inputs.shards_only
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -271,7 +278,7 @@ jobs:
   native-ssh-macos:
     name: Required macOS native SSH acceptance
     needs: changes
-    if: needs.changes.outputs.go == 'true'
+    if: needs.changes.outputs.go == 'true' && !inputs.shards_only
     runs-on: macos-latest
     timeout-minutes: 25
     env:
