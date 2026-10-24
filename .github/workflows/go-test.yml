@@ -25,6 +25,8 @@ on:
   # docs-only PRs, blocking their merge forever. The job instead short-circuits
   # cheaply when the diff touches nothing Go-related.
   pull_request:
+  # release.yml runs these same shards as its test gate.
+  workflow_call:
   push:
     branches:
       - main

@@ -12,8 +12,9 @@ on:
   # Manual escape hatch. A standalone tag re-push does not reliably re-fire
   # the tag-push event when the ref->SHA mapping is unchanged (GitHub
   # suppresses the duplicate event), which left v1.9.36 tagged but never
-  # published. Dispatch this against `main` with the tag to publish, e.g.
-  # `gh workflow run release.yml --ref main -f tag=v1.9.36`.
+  # published. Dispatch this with the tag to publish, e.g.
+  # `gh workflow run release.yml --ref v1.9.36 -f tag=v1.9.36`. The ref must be
+  # the tag itself: the test shards check out the ref the run was started on.
   workflow_dispatch:
     inputs:
       tag:
@@ -44,7 +45,18 @@ permissions:
   attestations: write
 
 jobs:
+  # The same parallel shards that gate PRs (go-test.yml). One job running the
+  # whole race suite serially sat at the 20m package timeout and failed by
+  # chance. The shards check out github.ref, so a dispatch from any ref other
+  # than the tag skips the release instead of testing the wrong commit.
+  tests:
+    if: github.repository == 'kickinrad/agent-deck' && (inputs.tag == '' || github.ref == format('refs/tags/{0}', inputs.tag))
+    permissions:
+      contents: read
+    uses: ./.github/workflows/go-test.yml
+
   release:
+    needs: tests
     if: github.repository == 'kickinrad/agent-deck'
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -172,19 +184,6 @@ jobs:
           sudo apt-get install -y zoxide
           zoxide --version
 
-      - name: Install gotestsum
-        timeout-minutes: 5
-        run: go install gotest.tools/gotestsum@v1.13.0
-
-      - name: Run tests
-        timeout-minutes: 50
-        env:
-          PERF_BUDGET_MULTIPLIER: '2.0'
-        run: |
-          go install gotest.tools/gotestsum@v1.13.0
-          PACKAGES=$(go list ./... | grep -v -E 'internal/(tmux|integration|tuitest)$')
-          gotestsum --rerun-fails=2 --rerun-fails-abort-on-data-race --packages="$PACKAGES" -- -race -timeout 20m
-
       - name: Run integration tests (informational)
         timeout-minutes: 15
         continue-on-error: true
@@ -200,7 +199,7 @@ jobs:
         env:
           GOTOOLCHAIN: go1.26.9
         # internal/ui is scoped to its eval cases (TestEval_*); the whole
-        # internal/ui suite already ran in "Run tests" and under -race it
+        # internal/ui suite already ran in the test shards and under -race it
         # alone can outlast this step's 6m package timeout.
         run: |
           go test -tags 'eval_smoke eval_full' -race -count=1 -timeout 6m ./tests/eval/...
