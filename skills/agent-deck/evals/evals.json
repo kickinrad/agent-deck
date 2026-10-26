@@ -666,7 +666,7 @@
     {
       "id": 3,
       "prompt": "Launch 4 child sessions to each fix lint errors in a different package of this monorepo, and let me know when they're all done without me having to keep checking.",
-      "expected_output": "Uses `agent-deck launch <path> -c claude --inherit-group -m \"...\"` per child (not a custom `-g`), and for the non-blocking notification either backgrounds `agent-deck session children --follow --until-done` or polls `session children --json`, rather than blocking the whole session on one `--wait` send.",
+      "expected_output": "Uses `agent-deck launch <path> -c claude --parent <actual-delegator-id> -m \"...\"` per child (not a custom `-g`), and for the non-blocking notification either backgrounds `agent-deck session children --follow --until-done` or polls `session children --json`, rather than blocking the whole session on one `--wait` send.",
       "files": [],
       "area": "core",
       "promises": [
@@ -684,7 +684,7 @@
       "checks": {
         "must": [
           "agent-deck launch",
-          "--inherit-group",
+          "--parent <actual-delegator-id>",
           "session children",
           "--until-done"
         ],
@@ -1174,29 +1174,6 @@
       }
     },
     {
-      "id": 22,
-      "area": "fleet",
-      "prompt": "I launched a fleet with `--no-parent` because I want to supervise them directly at the root level. Now `agent-deck ls --json` shows one of them under a weird detached group instead of with my others. What happened and how do I fix it?",
-      "expected_output": "Explains the group trap for --no-parent worktree sessions (falls back to the branch-leaf cwd-derived group instead of inheriting), and the fix (`agent-deck group move <child-id> \"$AGENTDECK_RESOLVED_GROUP\"`, then remove the empty stray group; next time pass `-g \"$AGENTDECK_RESOLVED_GROUP\"` on launch) without needing a restart.",
-      "files": [],
-      "promises": [
-        "cli-group-profile",
-        "fleet-no-parent-group"
-      ],
-      "sources": [
-        "references/fleet.md#Independent (un-parented) sessions"
-      ],
-      "checks": {
-        "must": [
-          "group move",
-          "AGENTDECK_RESOLVED_GROUP",
-          "branch.?leaf|cwd|folder-derived|derived[^\\n]{0,30}branch|branch[^\\n]{0,30}(group|leaf)",
-          "-g\\s+\"?\\$AGENTDECK_RESOLVED_GROUP"
-        ],
-        "must_not": []
-      }
-    },
-    {
       "id": 23,
       "area": "fleet",
       "prompt": "I backgrounded `agent-deck session children --follow --until-done` for my 5 children and it exited after two minutes, but only one child had finished. Is the watcher broken?",
@@ -1489,7 +1466,7 @@
     {
       "id": 35,
       "prompt": "From inside my ops conductor, start a separate root-level conductor session for project foo that should keep running after this one ends.",
-      "expected_output": "Uses `agent-deck launch ~/projects/foo -t conductor-foo -c claude -no-parent ...` directly (not launch-subagent.sh, which only makes children), then verifies that parent_session_id is null.",
+      "expected_output": "Uses `agent-deck launch ~/projects/foo -t conductor-foo -c claude ...` directly with no `--parent` (launches are independent roots by default), not launch-subagent.sh, which always links the caller as the parent.",
       "files": [],
       "area": "core",
       "promises": [
@@ -1501,12 +1478,12 @@
       ],
       "checks": {
         "must": [
-          "-?-no-parent",
           "agent-deck (-p \\S+ )?launch",
-          "parent_session_id"
+          "without[^\\n]{0,20}--parent|no `?--parent"
         ],
         "must_not": [
-          "(?m)^(?![^\\n]*\\b(never|not|don't|do not|avoid|no|instead|skip|without|rather than|unless)\\b)[^\\n]*launch-subagent\\.sh"
+          "(?m)^(?![^\\n]*\\b(never|not|don't|do not|avoid|no|instead|skip|without|rather than|unless)\\b)[^\\n]*launch-subagent\\.sh",
+          "agent-deck (-p \\S+ )?launch [^\\n]*--parent"
         ]
       }
     },

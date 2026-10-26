@@ -8,7 +8,7 @@
                  │      in group: sessions                                                            │
                  │                                                                                    │
                  │    ▶ Name:                                                                         │
-                 │      > opencode-idle                                                               │
+                 │      > project                                                                     │
                  │                                                                                    │
                  │      Command:                                                                      │
                  │        shell     claude     gemini     opencode     opencode2     codex            │

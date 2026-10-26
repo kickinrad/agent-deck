@@ -400,8 +400,8 @@
    "area": "core",
    "file": "references/sub-agents.md",
    "heading": "Peer (Root) Sessions vs Sub-Agents",
-   "anchor": "pass the `-no-parent` flag",
-   "summary": "Root-level peers (conductors, outliving sessions) use launch -no-parent.",
+   "anchor": "Launches are independent roots by default",
+   "summary": "Launches are roots by default; only --parent <session-id> links a delegated child.",
    "kind": "behaviour"
   },
   {
@@ -418,8 +418,8 @@
    "area": "core",
    "file": "references/sub-agents.md",
    "heading": "Peer (Root) Sessions vs Sub-Agents",
-   "anchor": "It does NOT support `-no-parent`.",
-   "summary": "launch-subagent.sh cannot create peers.",
+   "anchor": "`launch-subagent.sh` always links the calling session as the parent",
+   "summary": "launch-subagent.sh only makes children; independent sessions use agent-deck launch.",
    "kind": "behaviour"
   },
   {
@@ -448,8 +448,8 @@
    "area": "fleet",
    "file": "references/fleet.md",
    "heading": "When to use",
-   "anchor": "pass `--parent <session-id-or-title>`",
-   "summary": "Use --parent <id|title> to parent children to a specific session.",
+   "anchor": "`--parent <session-id>`",
+   "summary": "Fleet children name the actual delegator with --parent <session-id>.",
    "kind": "behaviour"
   },
   {
@@ -484,8 +484,8 @@
    "area": "fleet",
    "file": "references/fleet.md",
    "heading": "1. Fan out (one `launch` per child; loop it)",
-   "anchor": "**Do NOT pass a custom `-g/--group` for fleet children.**",
-   "summary": "One launch per child with --inherit-group; never a custom -g for parented children.",
+   "anchor": "**Parentage is explicit.**",
+   "summary": "One launch per child with --parent <delegator-id>; children inherit its group unless --group is set.",
    "kind": "behaviour"
   },
   {
@@ -531,15 +531,6 @@
    "heading": "5. Collect a finished child's result",
    "anchor": "Returns that child's latest full response.",
    "summary": "Collect results with session output <id> --json.",
-   "kind": "behaviour"
-  },
-  {
-   "id": "fleet-no-parent-group",
-   "area": "fleet",
-   "file": "references/fleet.md",
-   "heading": "Independent (un-parented) sessions",
-   "anchor": "So the rule **inverts** for independent sessions: *pass the group explicitly.*",
-   "summary": "--no-parent sessions need explicit -g \"$AGENTDECK_RESOLVED_GROUP\"; repair with group move.",
    "kind": "behaviour"
   },
   {
@@ -712,8 +703,8 @@
    "area": "core",
    "file": "references/gotchas.md",
    "heading": "`session send --no-wait` can leave prompts typed-but-not-submitted",
-   "anchor": "The Enter is idempotent",
-   "summary": "--no-wait race: sleep 3 then tmux send-keys Enter.",
+   "anchor": "**Supported response:** omit `--no-wait`",
+   "summary": "--no-wait race: omit --no-wait and let the readiness wait submit.",
    "kind": "behaviour"
   },
   {
@@ -2757,7 +2748,7 @@
    "area": "core",
    "file": "references/config-reference.md",
    "heading": "[launch] Section",
-   "anchor": "What `add` and `launch` do when run from inside a sub-session without `--parent`.",
+   "anchor": "What `add` does when run from inside a sub-session without `--parent`",
    "summary": "[launch] inject_identity, context_level, nest_under_parent, prompt_suggestions, fanout_hint; per-harness identity delivery.",
    "kind": "behaviour"
   },

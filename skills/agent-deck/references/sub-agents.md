@@ -186,7 +186,12 @@ session, name its exact ID without changing its parent or group.
 | User-started or otherwise independent work | none | `agent-deck launch <path> -c <tool>` |
 | Work explicitly delegated by a session | actual delegator | `agent-deck launch <path> -c <tool> --parent <session-id>` |
 
-To remove a link in place, run `agent-deck session unset-parent <session>`.
+To remove a link in place, run `agent-deck session unset-parent <session>` (alias: `session update <session> --no-parent`).
+The parent's `--add-dir` grant is gone after the next `session restart`.
+
+`launch-subagent.sh` always links the calling session as the parent, so it
+only makes delegated children. For an independent session, call
+`agent-deck launch` directly, without `--parent`.
 
 Use native `/clear` in Claude or `/new` in Codex to begin a fresh conversation
 inside an existing Deck session. The Deck entry remains while its stored
