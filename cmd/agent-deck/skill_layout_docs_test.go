@@ -51,6 +51,7 @@ func TestRepoShipsOneAgentDeckSkill(t *testing.T) {
 	}
 	var manifest struct {
 		Plugins []struct {
+			Name   string   `json:"name"`
 			Skills []string `json:"skills"`
 		} `json:"plugins"`
 	}
@@ -58,6 +59,9 @@ func TestRepoShipsOneAgentDeckSkill(t *testing.T) {
 		t.Fatalf("parse marketplace.json: %v", err)
 	}
 	for _, p := range manifest.Plugins {
+		if p.Name == "deck" {
+			continue // the fork's Claude Code mod ships agents, not skills
+		}
 		if len(p.Skills) != 1 || p.Skills[0] != "./skills/agent-deck" {
 			t.Errorf("marketplace.json plugin skills = %v, want [./skills/agent-deck]", p.Skills)
 		}
