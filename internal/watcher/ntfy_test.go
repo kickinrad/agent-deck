@@ -518,6 +518,41 @@ func TestNtfy_HealthCheck_StalledStreamReconnects(t *testing.T) {
 	}
 }
 
+func TestNtfy_HealthCheck_StalledSendReconnects(t *testing.T) {
+	var connections atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := connections.Add(1)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		fmt.Fprintln(w, `{"event":"open"}`)
+		if n == 1 {
+			fmt.Fprintln(w, `{"event":"message","id":"m1","message":"blocked"}`)
+		}
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer ts.Close()
+	a := &NtfyAdapter{initialBackoff: 10 * time.Millisecond, maxBackoff: 20 * time.Millisecond, livenessTimeout: 40 * time.Millisecond}
+	if err := a.Setup(context.Background(), AdapterConfig{Settings: map[string]string{"topic": "test", "server": ts.URL}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Listen(ctx, make(chan Event)) }() // nobody receives the message
+	defer func() { cancel(); <-done }()
+	deadline := time.After(2 * time.Second)
+	for {
+		_ = a.HealthCheck()
+		if connections.Load() >= 2 && a.HealthCheck() == nil {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("stalled message send did not reconnect")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 func TestNtfy_HealthCheck_DroppedStreamRecovers(t *testing.T) {
 	var connections atomic.Int32
 	firstOpened := make(chan struct{})

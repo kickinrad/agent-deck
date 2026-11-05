@@ -195,8 +195,8 @@ func (a *SlackAdapter) streamOnce(ctx context.Context, events chan<- Event) (tim
 		// moves past a message once it was handed on (#2538).
 		select {
 		case events <- evt:
-		case <-ctx.Done():
-			return time.Since(connected), ctx.Err()
+		case <-streamCtx.Done():
+			return time.Since(connected), streamCtx.Err()
 		}
 		a.mu.Lock()
 		a.lastID = msg.ID
