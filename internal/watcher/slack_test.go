@@ -466,7 +466,14 @@ func TestSlack_Listen_ReconnectsOnDisconnect(t *testing.T) {
 
 func TestSlack_HealthCheck_Reachable(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		fmt.Fprintln(w, `{"event":"open"}`)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
 	}))
 	defer ts.Close()
 
@@ -477,12 +484,21 @@ func TestSlack_HealthCheck_Reachable(t *testing.T) {
 		Settings: map[string]string{"topic": "test", "server": ts.URL},
 	})
 
-	if err := a.HealthCheck(); err != nil {
-		t.Errorf("expected nil from HealthCheck when server is reachable, got %v", err)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Listen(ctx, make(chan Event)) }()
+	defer func() { cancel(); <-done }()
+	deadline := time.After(2 * time.Second)
+	for a.HealthCheck() != nil {
+		select {
+		case <-deadline:
+			t.Fatal("idle subscription never became healthy")
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 }
 
-func TestSlack_HealthCheck_Unreachable(t *testing.T) {
+func TestSlack_HealthCheck_Disconnected(t *testing.T) {
 	a := &SlackAdapter{}
 	_ = a.Setup(context.Background(), AdapterConfig{
 		Type:     "slack",
@@ -491,7 +507,7 @@ func TestSlack_HealthCheck_Unreachable(t *testing.T) {
 	})
 
 	if err := a.HealthCheck(); err == nil {
-		t.Error("expected error from HealthCheck when server is unreachable")
+		t.Error("expected error from HealthCheck without a stream")
 	}
 }
 

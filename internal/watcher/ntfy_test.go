@@ -360,7 +360,14 @@ func TestNtfy_Listen_BackoffIncreases(t *testing.T) {
 
 func TestNtfy_HealthCheck_Reachable(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		fmt.Fprintln(w, `{"event":"open"}`)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
 	}))
 	defer ts.Close()
 
@@ -371,12 +378,201 @@ func TestNtfy_HealthCheck_Reachable(t *testing.T) {
 		Settings: map[string]string{"topic": "test", "server": ts.URL},
 	})
 
-	if err := a.HealthCheck(); err != nil {
-		t.Errorf("expected nil from HealthCheck when server is reachable, got %v", err)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Listen(ctx, make(chan Event)) }()
+	defer func() { cancel(); <-done }()
+
+	// A connected, idle subscription remains healthy without routed events.
+	deadline := time.After(2 * time.Second)
+	for {
+		if err := a.HealthCheck(); err == nil {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("subscription never became healthy")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	tracker := NewHealthTracker("ntfy", 10080)
+	for i := 0; i < 5; i++ {
+		if err := a.HealthCheck(); err != nil {
+			tracker.SetAdapterHealth(false)
+			tracker.RecordError()
+		} else {
+			tracker.SetAdapterHealth(true)
+		}
+	}
+	state := tracker.Check()
+	if state.Status != HealthStatusHealthy || state.ConsecutiveErrors != 0 {
+		t.Errorf("idle connected stream: health = %s, consecutive errors = %d", state.Status, state.ConsecutiveErrors)
 	}
 }
 
-func TestNtfy_HealthCheck_Unreachable(t *testing.T) {
+func TestNtfy_HealthCheck_KeepaliveKeepsIdleStreamHealthy(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		fmt.Fprintln(w, `{"event":"open"}`)
+		w.(http.Flusher).Flush()
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				fmt.Fprintln(w, `{"event":"keepalive"}`)
+				w.(http.Flusher).Flush()
+			case <-r.Context().Done():
+				return
+			}
+		}
+	}))
+	defer ts.Close()
+	a := &NtfyAdapter{livenessTimeout: 40 * time.Millisecond}
+	if err := a.Setup(context.Background(), AdapterConfig{Settings: map[string]string{"topic": "test", "server": ts.URL}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Listen(ctx, make(chan Event)) }()
+	defer func() { cancel(); <-done }()
+	deadline := time.After(2 * time.Second)
+	for a.HealthCheck() != nil {
+		select {
+		case <-deadline:
+			t.Fatal("subscription never became healthy")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	tracker := NewHealthTracker("ntfy", 10080)
+	for i := 0; i < 8; i++ {
+		time.Sleep(15 * time.Millisecond)
+		if err := a.HealthCheck(); err != nil {
+			tracker.SetAdapterHealth(false)
+			tracker.RecordError()
+		} else {
+			tracker.SetAdapterHealth(true)
+		}
+	}
+	state := tracker.Check()
+	if state.Status != HealthStatusHealthy || state.ConsecutiveErrors != 0 || !state.LastEventTime.IsZero() {
+		t.Errorf("idle stream: health = %s, errors = %d, last event = %v", state.Status, state.ConsecutiveErrors, state.LastEventTime)
+	}
+}
+
+func TestNtfy_HealthCheck_StalledStreamReconnects(t *testing.T) {
+	var connections atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := connections.Add(1)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		fmt.Fprintln(w, `{"event":"open"}`)
+		w.(http.Flusher).Flush()
+		if n == 1 {
+			<-r.Context().Done()
+			return
+		}
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				fmt.Fprintln(w, `{"event":"keepalive"}`)
+				w.(http.Flusher).Flush()
+			case <-r.Context().Done():
+				return
+			}
+		}
+	}))
+	defer ts.Close()
+	a := &NtfyAdapter{initialBackoff: 10 * time.Millisecond, maxBackoff: 20 * time.Millisecond, livenessTimeout: 40 * time.Millisecond}
+	if err := a.Setup(context.Background(), AdapterConfig{Settings: map[string]string{"topic": "test", "server": ts.URL}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Listen(ctx, make(chan Event)) }()
+	defer func() { cancel(); <-done }()
+	deadline := time.After(2 * time.Second)
+	connected := false
+	stalled := false
+	for {
+		err := a.HealthCheck()
+		if err == nil && connections.Load() == 1 {
+			connected = true
+		}
+		if connected && err != nil && connections.Load() == 1 {
+			stalled = true
+		}
+		if stalled && connections.Load() >= 2 && err == nil {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("stalled stream did not fail and recover (stalled=%v, connections=%d)", stalled, connections.Load())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func TestNtfy_HealthCheck_DroppedStreamRecovers(t *testing.T) {
+	var connections atomic.Int32
+	firstOpened := make(chan struct{})
+	dropFirst := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := connections.Add(1)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		fmt.Fprintln(w, `{"event":"open"}`)
+		w.(http.Flusher).Flush()
+		if n == 1 {
+			close(firstOpened)
+			<-dropFirst
+			return
+		}
+		<-r.Context().Done()
+	}))
+	defer ts.Close()
+	a := &NtfyAdapter{initialBackoff: 100 * time.Millisecond, maxBackoff: 100 * time.Millisecond}
+	if err := a.Setup(context.Background(), AdapterConfig{Settings: map[string]string{"topic": "test", "server": ts.URL}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Listen(ctx, make(chan Event)) }()
+	defer func() { cancel(); <-done }()
+	<-firstOpened
+	deadline := time.After(2 * time.Second)
+	for a.HealthCheck() != nil {
+		select {
+		case <-deadline:
+			t.Fatal("first stream never became healthy")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	close(dropFirst)
+	for a.HealthCheck() == nil {
+		select {
+		case <-deadline:
+			t.Fatal("closed stream never became unhealthy")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	for {
+		if connections.Load() >= 2 && a.HealthCheck() == nil {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("new stream never recovered")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+func TestNtfy_HealthCheck_Disconnected(t *testing.T) {
 	a := &NtfyAdapter{}
 	_ = a.Setup(context.Background(), AdapterConfig{
 		Type:     "ntfy",
@@ -385,7 +581,7 @@ func TestNtfy_HealthCheck_Unreachable(t *testing.T) {
 	})
 
 	if err := a.HealthCheck(); err == nil {
-		t.Error("expected error from HealthCheck when server is unreachable")
+		t.Error("expected error from HealthCheck without a stream")
 	}
 }
 

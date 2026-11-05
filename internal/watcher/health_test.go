@@ -92,3 +92,16 @@ func TestHealthTracker_AdapterUnhealthyProducesError(t *testing.T) {
 		t.Errorf("expected Error when adapter is unhealthy, got %q", state.Status)
 	}
 }
+
+func TestHealthTracker_HealthCheckRecoveryClearsConsecutiveErrors(t *testing.T) {
+	h := watcher.NewHealthTracker("ntfy", 10080)
+	h.SetAdapterHealth(false)
+	for i := 0; i < 5; i++ {
+		h.RecordError()
+	}
+	h.SetAdapterHealth(true)
+	state := h.Check()
+	if state.Status != watcher.HealthStatusHealthy || state.ConsecutiveErrors != 0 {
+		t.Errorf("recovered adapter: health = %s, consecutive errors = %d", state.Status, state.ConsecutiveErrors)
+	}
+}

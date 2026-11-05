@@ -35,7 +35,8 @@ type HealthState struct {
 	// LastEventTime is the time of the most recently received event
 	LastEventTime time.Time
 
-	// ConsecutiveErrors is the number of consecutive HealthCheck errors since the last event
+	// ConsecutiveErrors is the number of consecutive errors since the last event
+	// or adapter recovery.
 	ConsecutiveErrors int
 
 	// Message is a human-readable explanation for Warning or Error states
@@ -152,6 +153,9 @@ func (h *HealthTracker) RecordError() {
 func (h *HealthTracker) SetAdapterHealth(healthy bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if healthy && !h.adapterHealthy {
+		h.consecutiveErrors = 0
+	}
 	h.adapterHealthy = healthy
 }
 
