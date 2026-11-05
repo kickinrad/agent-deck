@@ -25,13 +25,16 @@ type SlackAdapter struct {
 	token  string       // optional ntfy access token, sent as a Bearer header
 	client *http.Client // HTTP client for streaming requests
 
-	lastID string     // `since` for the next subscription: last handed-on message ID or the persisted resume position
-	mu     sync.Mutex // protects lastID
+	lastID       string             // `since` for the next subscription: last handed-on message ID or the persisted resume position
+	lastFrame    time.Time          // last frame on the active subscription; zero while disconnected
+	streamCancel context.CancelFunc // cancels a stalled subscription so Listen can reconnect
+	mu           sync.Mutex         // protects stream state and lastID
 
 	// initialBackoff and maxBackoff are configurable for testing.
 	// Production defaults: 2s initial, 30s max.
-	initialBackoff time.Duration
-	maxBackoff     time.Duration
+	initialBackoff  time.Duration
+	maxBackoff      time.Duration
+	livenessTimeout time.Duration
 }
 
 // slackV2Payload is the Cloudflare Worker output schema (D-09).
@@ -77,6 +80,8 @@ func (a *SlackAdapter) Setup(_ context.Context, config AdapterConfig) error {
 	// while agent-deck was down are fetched on the first subscription (#2538).
 	a.mu.Lock()
 	a.lastID = config.ResumeSince
+	a.lastFrame = time.Time{}
+	a.streamCancel = nil
 	a.mu.Unlock()
 
 	// Set defaults for backoff if not already set (tests may override before Listen).
@@ -85,6 +90,9 @@ func (a *SlackAdapter) Setup(_ context.Context, config AdapterConfig) error {
 	}
 	if a.maxBackoff == 0 {
 		a.maxBackoff = 30 * time.Second
+	}
+	if a.livenessTimeout == 0 {
+		a.livenessTimeout = 90 * time.Second
 	}
 
 	return nil
@@ -124,6 +132,14 @@ func (a *SlackAdapter) Listen(ctx context.Context, events chan<- Event) error {
 // the connection closes or the context is cancelled. It returns how long the
 // stream stayed up after the server accepted it (0 if it never did).
 func (a *SlackAdapter) streamOnce(ctx context.Context, events chan<- Event) (time.Duration, error) {
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer func() {
+		a.mu.Lock()
+		a.lastFrame = time.Time{}
+		a.streamCancel = nil
+		a.mu.Unlock()
+	}()
 	a.mu.Lock()
 	lastID := a.lastID
 	a.mu.Unlock()
@@ -133,7 +149,7 @@ func (a *SlackAdapter) streamOnce(ctx context.Context, events chan<- Event) (tim
 		streamURL += "?since=" + lastID
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
+	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, streamURL, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -152,12 +168,19 @@ func (a *SlackAdapter) streamOnce(ctx context.Context, events chan<- Event) (tim
 	}
 
 	connected := time.Now()
+	a.mu.Lock()
+	a.lastFrame = connected
+	a.streamCancel = cancel
+	a.mu.Unlock()
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		var msg ntfyMessage
 		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
 			continue // malformed JSON line, skip
 		}
+		a.mu.Lock()
+		a.lastFrame = time.Now()
+		a.mu.Unlock()
 		if msg.Event != "message" {
 			continue // skip "open" and "keepalive" events
 		}
@@ -172,8 +195,8 @@ func (a *SlackAdapter) streamOnce(ctx context.Context, events chan<- Event) (tim
 		// moves past a message once it was handed on (#2538).
 		select {
 		case events <- evt:
-		case <-ctx.Done():
-			return time.Since(connected), ctx.Err()
+		case <-streamCtx.Done():
+			return time.Since(connected), streamCtx.Err()
 		}
 		a.mu.Lock()
 		a.lastID = msg.ID
@@ -247,31 +270,20 @@ func (a *SlackAdapter) Teardown() error {
 	return nil
 }
 
-// HealthCheck verifies the ntfy server is reachable by sending an HTTP HEAD request
-// with a 5-second timeout. It reports an error instead of dereferencing a nil
-// client when Setup never completed (#1886).
+// HealthCheck checks the subscription that delivers bridged Slack messages.
+// Cancel a stalled stream so Listen reconnects instead of waiting indefinitely.
 func (a *SlackAdapter) HealthCheck() error {
 	if a.client == nil {
 		return errors.New("slack adapter is not set up")
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, a.server, nil)
-	if err != nil {
-		return err
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.lastFrame.IsZero() {
+		return errors.New("slack stream is disconnected")
 	}
-
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return err
+	if time.Since(a.lastFrame) > a.livenessTimeout {
+		a.streamCancel()
+		return errors.New("slack stream stopped receiving frames")
 	}
-	resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("slack health check returned status %d", resp.StatusCode)
-	}
-
 	return nil
 }
