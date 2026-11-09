@@ -405,7 +405,11 @@ func handleSessionSend(profile string, args []string) {
 			acceptanceGuard = nil
 			fmt.Fprintf(os.Stderr, "Note: no Codex accepted-turn receipt yet (%v); sending through the composer (--codex-composer-fallback)\n", guardErr)
 		default:
-			out.ErrorWithData(fmt.Sprintf("cannot establish exact Codex turn acceptance: %v", guardErr), ErrCodeInvalidOperation,
+			refusal := fmt.Sprintf("cannot establish exact Codex turn acceptance: %v", guardErr)
+			if strings.Contains(guardErr.Error(), "Codex acceptance lock timed out") {
+				refusal += "; retry with --queue to deliver when the target is idle"
+			}
+			out.ErrorWithData(refusal, ErrCodeInvalidOperation,
 				codexAcceptanceRefusalData(guardErr))
 			exitCLI(1)
 		}
