@@ -115,12 +115,11 @@ func drainForStopHook(instanceID string, stopHookActive bool, shown func(Transit
 	if !InboxHasPending(instanceID) {
 		return StopHookDecision{}, false, nil, nil
 	}
-	// Issue #2469, design principle 4: a busy parent is interrupted at its
-	// turn boundary only for urgent records. Info records stay queued and are
-	// injected by the prompt-time drain of the next turn the parent takes
-	// anyway (or by the info digest). When an urgent record is present the
-	// whole queue is drained so the info rides along in the same block.
-	if !InboxHasUrgentPending(instanceID) {
+	// A turn edge, even an untiered legacy one or a question, is not proof
+	// that the child's task completed. Leave it for inbox drain or the next
+	// prompt. A sentinel or terminal status blocks without labelling the
+	// ordinary edges as completed.
+	if !inboxHasStopHookWork(instanceID, shown) {
 		return StopHookDecision{}, false, nil, nil
 	}
 
@@ -152,7 +151,18 @@ func drainForStopHook(instanceID string, stopHookActive bool, shown func(Transit
 		return StopHookDecision{}, false, nil, err
 	}
 
-	drained, err := DrainInboxForParent(instanceID)
+	// Recheck under the inbox lock: the triggering record could have been
+	// drained by another consumer since the peek. Select only completions and
+	// already shown records; plain edges stay queued for inbox drain.
+	drained, err := DrainInboxForParentWhere(instanceID, func(pending []TransitionNotificationEvent) []TransitionNotificationEvent {
+		var selected []TransitionNotificationEvent
+		for _, ev := range pending {
+			if stopHookTrigger(ev) || (shown != nil && shown(ev)) {
+				selected = append(selected, ev)
+			}
+		}
+		return selected
+	})
 	if err != nil {
 		return StopHookDecision{}, false, nil, err
 	}
@@ -189,6 +199,28 @@ func drainForStopHook(instanceID string, stopHookActive bool, shown func(Transit
 		Decision: "block",
 		Reason:   reason,
 	}, true, events, nil
+}
+
+func stopHookTrigger(ev TransitionNotificationEvent) bool {
+	status := normalizeStatusString(ev.ToStatus)
+	return ev.Kind == transitionKindFinished || status == string(StatusError) || status == string(StatusStopped)
+}
+
+func inboxHasStopHookWork(parentID string, shown func(TransitionNotificationEvent) bool) bool {
+	if fileHasContent(inboxInflightPathFor(parentID)) {
+		return true // recover an interrupted drain under the inbox lock
+	}
+	events, err := ReadInboxEventsForDisplay(parentID)
+	if err != nil {
+		return true // leave delivery to the durable consumer
+	}
+	reads := loadResultReads(parentID)
+	for _, ev := range events {
+		if (stopHookTrigger(ev) && !reads.covers(ev)) || (shown != nil && shown(ev)) {
+			return true
+		}
+	}
+	return false
 }
 
 // urgentLatencyMS returns the age of the newest urgent record in ms, or 0.

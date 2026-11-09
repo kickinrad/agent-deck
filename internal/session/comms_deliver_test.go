@@ -367,10 +367,9 @@ func TestLedgerConsumer_AFailedPassFallsBackToTheInbox(t *testing.T) {
 	}
 }
 
-// Verifier round 1 (#7): when the ledger has nothing urgent the Stop hook
-// does not block on it, so the inbox's Stop drain still blocks for a
-// remote urgent record (hook_handler runs DrainForStopHook next).
-func TestLedgerConsumer_RemoteUrgentStillBlocksAtStop(t *testing.T) {
+// A remote question is urgent for the inbox but does not assert completion.
+// The Stop hook leaves it retrievable by inbox drain.
+func TestLedgerConsumer_RemoteQuestionStaysQueuedAtStop(t *testing.T) {
 	f := newDeliverFixture(t)
 	remote := TransitionNotificationEvent{ChildSessionID: "r1:kid", ChildTitle: "kid", ToStatus: "waiting", Tier: TurnTierUrgent,
 		Text: "remote question?", Question: true, TargetKind: "parent", Profile: "default", SourceRemote: "r1"}
@@ -378,10 +377,14 @@ func TestLedgerConsumer_RemoteUrgentStillBlocksAtStop(t *testing.T) {
 		t.Fatal(err)
 	}
 	dl, ok := LedgerStopDecision(f.parent.ID, false)
-	if !ok || !dl.Blocked || dl.Decision.Decision != "block" || !strings.Contains(dl.Decision.Reason, "remote question?") {
-		t.Fatalf("the ledger hook returns the inbox block for the remote record: %+v", dl)
+	if !ok || dl.Blocked || dl.Decision.Decision != "" {
+		t.Fatalf("the ledger hook must not block for a remote question: %+v", dl)
 	}
-	dl.Done(true)
+	dl.Done(false)
+	events, err := DrainInboxForParent(f.parent.ID)
+	if err != nil || len(events) != 1 || events[0].Text != "remote question?" {
+		t.Fatalf("remote question must remain retrievable: events=%+v err=%v", events, err)
+	}
 }
 
 // Verifier round 1 (#5): a record too long for the line is previewed in
@@ -727,8 +730,15 @@ func TestLedgerConsumer_FinalPassFlipsSurviveShownTurn(t *testing.T) {
 					dl, _ = LedgerPromptContext(f.parent.ID, "next")
 				} else {
 					dl, _ = LedgerStopDecision(f.parent.ID, false)
+					if flip == "stale" {
+						if dl.Blocked || dl.Text != "" {
+							t.Fatalf("plain edge blocked Stop: %+v", dl)
+						}
+						dl.Done(false)
+						dl, _ = LedgerPromptContext(f.parent.ID, "next")
+					}
 				}
-				if !strings.Contains(dl.Text, ev.Text) || (path == "stop" && !dl.Blocked) {
+				if !strings.Contains(dl.Text, ev.Text) || (path == "stop" && flip == "error" && !dl.Blocked) {
 					t.Fatalf("new edge lost: %+v", dl)
 				}
 				dl.Done(true)
