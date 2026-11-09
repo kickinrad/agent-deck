@@ -102,6 +102,29 @@ func issue2549Guard(inst *session.Instance, peers []*session.Instance, storage *
 	return acquireCodexAcceptanceGuard(inst, time.Second)
 }
 
+func TestBusyCodexSendNamesQueueAfterAcceptanceLockTimeout(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, ".local", "share"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	inst, storage := newIssue2549Instance(t, root, "ch_support_test", "busy-codex")
+	if err := storage.SaveWithGroups([]*session.Instance{inst}, nil); err != nil {
+		t.Fatal(err)
+	}
+	startRotatedCodexPane(t, root, filepath.Join(root, "codex"), inst, issue2549OldThread, issue2549OldThread)
+	lock, err := session.AcquireCodexAcceptanceLock(issue2549OldThread, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+
+	stdout, stderr, code := runAgentDeck(t, root, "session", "send", inst.ID, "hold", "--timeout=100ms")
+	if code != 1 || !strings.Contains(stdout+stderr, "Codex acceptance lock timed out") || !strings.Contains(stdout+stderr, "--queue") {
+		t.Fatalf("busy Codex send: exit %d, stdout %q, stderr %q; want timeout with --queue hint", code, stdout, stderr)
+	}
+}
+
 // The live process moved to a new thread and the registered id has no
 // rollout under this Codex home: the exact symptom in the report ("current
 // rollout generation is unavailable"). The send must adopt the one thread the
