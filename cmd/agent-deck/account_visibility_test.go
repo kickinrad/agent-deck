@@ -43,9 +43,9 @@ func TestCLIStoredAccountVisibility(t *testing.T) {
 	type fixture struct{ id, profile, account string }
 	var fixtures []fixture
 	for p, profile := range profiles {
-		run(t, "-p", profile, "list", "--json")
 		db, err := statedb.Open(filepath.Join(home, ".local", "share", "agent-deck", "profiles", profile, "state.db"))
 		require.NoError(t, err)
+		require.NoError(t, db.Migrate())
 		for i, account := range slots {
 			id := fmt.Sprintf("slot%d%03d", p, i)
 			require.NoError(t, db.SaveInstance(&statedb.InstanceRow{ID: id, Title: "same-title", ProjectPath: home, Tool: "shell", Status: "idle", Account: account, CreatedAt: time.Now()}))

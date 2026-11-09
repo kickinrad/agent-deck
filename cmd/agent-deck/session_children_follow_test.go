@@ -92,7 +92,7 @@ func TestChildTerminal(t *testing.T) {
 		{"stale done cannot override running", childRow{Status: "running", DoneStatus: "ok"}, false},
 		{"stale done cannot override queued", childRow{Status: "queued", DoneStatus: "ok"}, false},
 		{"stale done cannot override unknown", childRow{Status: "unknown", DoneStatus: "ok"}, false},
-		{"waiting is terminal for supervision", childRow{Status: "waiting"}, true},
+		{"waiting needs a later completion", childRow{Status: "waiting"}, false},
 		{"idle without sentinel is not terminal", childRow{Status: "idle"}, false},
 		{"done sentinel is terminal", childRow{Status: "idle", DoneStatus: "ok"}, true},
 		{"done fail sentinel is terminal", childRow{Status: "idle", DoneStatus: "fail"}, true},
@@ -133,6 +133,31 @@ func TestRunChildrenFollowWaitsForCurrentTurnFinish(t *testing.T) {
 	}
 }
 
+func TestRunChildrenFollowAwaitsChildAddedAfterStart(t *testing.T) {
+	polls := 0
+	restore := pollChildRows
+	pollChildRows = func(string, string) ([]childRow, error) {
+		polls++
+		switch polls {
+		case 1:
+			return nil, nil
+		case 2:
+			return []childRow{{ID: "later", Status: "waiting"}}, nil
+		default:
+			return []childRow{{ID: "later", Status: "idle", DoneStatus: "ok"}}, nil
+		}
+	}
+	t.Cleanup(func() { pollChildRows = restore })
+	var out strings.Builder
+	if code := runChildrenFollow("p", "parent", time.Millisecond, 0, true, &out); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if polls != 3 || !strings.Contains(out.String(), `"event":"added","id":"later"`) ||
+		!strings.Contains(out.String(), `"event":"complete"`) {
+		t.Fatalf("follow did not await added child completion; polls=%d, output:\n%s", polls, out.String())
+	}
+}
+
 func TestAllChildrenTerminal(t *testing.T) {
 	if !allChildrenTerminal([]childRow{{Status: "error"}, {Status: "idle", DoneStatus: "ok"}}) {
 		t.Error("expected all terminal")
@@ -140,8 +165,8 @@ func TestAllChildrenTerminal(t *testing.T) {
 	if allChildrenTerminal([]childRow{{Status: "idle", DoneStatus: "ok"}, {Status: "running"}}) {
 		t.Error("expected not all terminal while one is running")
 	}
-	if !allChildrenTerminal(nil) {
-		t.Error("empty set is vacuously terminal")
+	if allChildrenTerminal(nil) {
+		t.Error("a follow started before children exist must await additions")
 	}
 }
 
@@ -245,9 +270,14 @@ func TestRunChildrenFollowEmitsWaitingAndErrorImmediately(t *testing.T) {
 				{ID: "waiting", Title: "needs-input", Status: "running"},
 				{ID: "error", Title: "crashed", Status: "running"},
 			}, nil
-		default:
+		case 2:
 			return []childRow{
 				{ID: "waiting", Title: "needs-input", Status: "waiting"},
+				{ID: "error", Title: "crashed", Status: "error"},
+			}, nil
+		default:
+			return []childRow{
+				{ID: "waiting", Title: "needs-input", Status: "idle", DoneStatus: "ok"},
 				{ID: "error", Title: "crashed", Status: "error"},
 			}, nil
 		}
@@ -259,12 +289,13 @@ func TestRunChildrenFollowEmitsWaitingAndErrorImmediately(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 5 {
-		t.Fatalf("events = %d, want 5 (2 snapshots, waiting status, error status, complete):\n%s", len(lines), out.String())
+	if len(lines) != 7 {
+		t.Fatalf("events = %d, want 7 (2 snapshots, waiting and error statuses, completion):\n%s", len(lines), out.String())
 	}
 	for i, want := range []string{
 		`"event":"snapshot"`, `"event":"snapshot"`,
 		`"event":"status","id":"waiting"`, `"event":"status","id":"error"`,
+		`"event":"status","id":"waiting"`, `"event":"done","id":"waiting"`,
 		`"event":"complete"`,
 	} {
 		if !strings.Contains(lines[i], want) {
