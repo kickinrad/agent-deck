@@ -17,6 +17,7 @@ func commitForStop(t *testing.T, parent, child, turn string) {
 	if err := CommitToInbox(parent, TransitionNotificationEvent{
 		ChildSessionID: child, ChildTitle: "worker", Profile: "personal",
 		FromStatus: "running", ToStatus: "waiting",
+		Kind: transitionKindFinished, DoneStatus: "ok",
 		LastOutputHash: turn, Timestamp: time.Now(),
 	}); err != nil {
 		t.Fatalf("commit: %v", err)
