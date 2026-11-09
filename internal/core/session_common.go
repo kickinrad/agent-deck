@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
@@ -40,7 +41,19 @@ type sessionData struct {
 
 // loadSessionData opens the profile store and loads every instance and group.
 func loadSessionData(profile string) (*sessionData, error) {
-	storage, err := session.NewStorageWithProfile(profile)
+	return loadSessionDataWith(profile, session.NewStorageWithProfile)
+}
+
+func loadSessionDataReadOnly(profile string) (*sessionData, error) {
+	d, err := loadSessionDataWith(profile, session.NewLiveReadOnlyStorageWithProfile)
+	if errors.Is(err, os.ErrNotExist) {
+		return &sessionData{}, nil
+	}
+	return d, err
+}
+
+func loadSessionDataWith(profile string, open func(string) (*session.Storage, error)) (*sessionData, error) {
+	storage, err := open(profile)
 	if err != nil {
 		return nil, &Error{Code: CodeStorage, Message: fmt.Sprintf("failed to initialize storage: %v", err), Cause: err}
 	}

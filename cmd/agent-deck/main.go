@@ -3127,8 +3127,21 @@ func handleList(profile string, args []string) {
 	}
 	ensureTmuxInPathOrExit()
 
-	storage, err := session.NewStorageWithProfile(profile)
+	storage, err := session.NewLiveReadOnlyStorageWithProfile(profile)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			resolved, resolveErr := session.ResolveProfileForStorage(profile)
+			if resolveErr != nil {
+				fmt.Printf("Error: failed to initialize storage: %v\n", resolveErr)
+				exitCLI(1)
+			}
+			if *jsonOutput {
+				fmt.Println("[]")
+			} else {
+				fmt.Printf("No sessions found in profile '%s'.\n", resolved)
+			}
+			return
+		}
 		fmt.Printf("Error: failed to initialize storage: %v\n", err)
 		exitCLI(1)
 	}
@@ -3403,6 +3416,10 @@ func handleListAllProfiles(jsonOutput, includeSuperseded, noArchived bool) {
 		exitCLI(1)
 	}
 
+	if len(profiles) == 0 && jsonOutput {
+		fmt.Println("[]")
+		return
+	}
 	if len(profiles) == 0 {
 		fmt.Println("No profiles found.")
 		return
@@ -3432,7 +3449,7 @@ func handleListAllProfiles(jsonOutput, includeSuperseded, noArchived bool) {
 		allSessions := []sessionJSON{}
 
 		for _, profileName := range profiles {
-			storage, err := session.NewStorageWithProfile(profileName)
+			storage, err := session.NewLiveReadOnlyStorageWithProfile(profileName)
 			if err != nil {
 				continue
 			}
@@ -3483,7 +3500,7 @@ func handleListAllProfiles(jsonOutput, includeSuperseded, noArchived bool) {
 	// Table output grouped by profile
 	totalSessions := 0
 	for _, profileName := range profiles {
-		storage, err := session.NewStorageWithProfile(profileName)
+		storage, err := session.NewLiveReadOnlyStorageWithProfile(profileName)
 		if err != nil {
 			continue
 		}
