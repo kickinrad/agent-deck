@@ -152,7 +152,7 @@ func diffChildEvents(prev, curr []childRow) []followEvent {
 // while the child is idle; it must never override active or unknown live state.
 func childTerminal(r childRow) bool {
 	switch r.Status {
-	case "waiting", "error", "stopped":
+	case "error", "stopped":
 		return true
 	case "idle":
 		return r.DoneStatus != ""
@@ -162,6 +162,9 @@ func childTerminal(r childRow) bool {
 }
 
 func allChildrenTerminal(rows []childRow) bool {
+	if len(rows) == 0 {
+		return false
+	}
 	for _, r := range rows {
 		if !childTerminal(r) {
 			return false
@@ -197,7 +200,7 @@ var pollChildRows = loadChildRows
 // status refresh, row build. Storage is closed before returning so the poll
 // loop never accumulates DB handles.
 func loadChildRows(profile, parentID string) ([]childRow, error) {
-	storage, instances, _, err := loadSessionData(profile)
+	storage, instances, _, err := loadSessionDataReadOnly(profile)
 	if err != nil {
 		return nil, err
 	}
@@ -227,9 +230,7 @@ func loadChildRows(profile, parentID string) ([]childRow, error) {
 // interval must be positive; the caller validates it, since a non-positive
 // sleep would turn the poll into a busy-loop that reopens storage every pass.
 //
-// With untilDone, a parent that currently has no children is already "all
-// terminal" and completes immediately. Callers that mean to watch for children
-// yet to be spawned must attach after at least one child exists.
+// With untilDone, an empty child set keeps watching for children added later.
 func runChildrenFollow(profile, parentID string, interval, heartbeat time.Duration, untilDone bool, w io.Writer) int {
 	// emit reports whether the stream is still writable. A consumer that goes
 	// away mid-stream (`... | head -1`) makes every later write fail; without

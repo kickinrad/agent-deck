@@ -68,7 +68,7 @@ func handleSessionShow(profile string, args []string) {
 	out := NewCLIOutput(*jsonOutput, quietMode)
 
 	// Load sessions
-	storage, instances, groupsData, err := loadSessionData(profile)
+	storage, instances, groupsData, err := loadSessionDataReadOnly(profile)
 	if err != nil {
 		out.Error(err.Error(), ErrCodeNotFound)
 		exitCLI(1)
@@ -90,7 +90,7 @@ func handleSessionShow(profile string, args []string) {
 					// data too, or groupTree below is built from the wrong
 					// profile and SessionPosition can't find inst (order: -1).
 					profile = foundProfile
-					storage, instances, groupsData, err = loadSessionData(profile)
+					storage, instances, groupsData, err = loadSessionDataReadOnly(profile)
 					if err != nil {
 						out.Error(err.Error(), ErrCodeNotFound)
 						exitCLI(1)
@@ -736,7 +736,7 @@ func findSessionByTmuxAcrossProfiles() (*session.Instance, string) {
 	}
 
 	for _, p := range profiles {
-		_, instances, _, err := loadSessionData(p)
+		_, instances, _, err := loadSessionDataReadOnly(p)
 		if err != nil {
 			continue
 		}

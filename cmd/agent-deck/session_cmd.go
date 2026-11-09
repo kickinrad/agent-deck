@@ -718,7 +718,19 @@ var errFocusRemoteUnknown = errors.New("remote is not configured")
 // loadSessionData loads storage and session data for a profile
 // The Storage.LoadWithGroups() method already handles tmux reconnection internally
 func loadSessionData(profile string) (*session.Storage, []*session.Instance, []*session.GroupData, error) {
-	storage, err := session.NewStorageWithProfile(profile)
+	return loadSessionDataWith(profile, session.NewStorageWithProfile)
+}
+
+func loadSessionDataReadOnly(profile string) (*session.Storage, []*session.Instance, []*session.GroupData, error) {
+	storage, instances, groups, err := loadSessionDataWith(profile, session.NewLiveReadOnlyStorageWithProfile)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil, nil, nil
+	}
+	return storage, instances, groups, err
+}
+
+func loadSessionDataWith(profile string, open func(string) (*session.Storage, error)) (*session.Storage, []*session.Instance, []*session.GroupData, error) {
+	storage, err := open(profile)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to initialize storage: %w", err)
 	}
@@ -991,7 +1003,7 @@ func handleSessionChildren(profile string, args []string) {
 	follow := fs.Bool("follow", false, "Stream child state changes as JSONL (one event per line) until interrupted")
 	interval := fs.Duration("interval", 2*time.Second, "Poll interval for --follow")
 	heartbeat := fs.Duration("heartbeat", 60*time.Second, "Heartbeat event interval for --follow (0 disables)")
-	untilDone := fs.Bool("until-done", false, "With --follow: exit 0 once live state shows every child needs input or is terminal (waiting, idle with completion history, error, or stopped)")
+	untilDone := fs.Bool("until-done", false, "With --follow: exit 0 once every child has asserted completion or stopped with an error")
 	fs.Usage = func() {
 		fmt.Println("Usage: agent-deck session children [id|title] [options]")
 		fmt.Println()
@@ -1009,7 +1021,7 @@ func handleSessionChildren(profile string, args []string) {
 		fmt.Println("Examples:")
 		fmt.Println("  agent-deck session children --json")
 		fmt.Println("  agent-deck session children --follow                    # live fleet event stream")
-		fmt.Println("  agent-deck session children --follow --until-done      # exits when every child needs input or finishes")
+		fmt.Println("  agent-deck session children --follow --until-done      # waits for completion, including children added while following")
 	}
 	if err := parseCLIFlags(fs, normalizeArgs(fs, args)); err != nil {
 		exitCLI(1)
@@ -1018,7 +1030,7 @@ func handleSessionChildren(profile string, args []string) {
 	quietMode := *quiet || *quietShort
 	out := NewCLIOutput(*jsonOutput, quietMode)
 
-	_, instances, _, err := loadSessionData(profile)
+	_, instances, _, err := loadSessionDataReadOnly(profile)
 	if err != nil {
 		out.Error(err.Error(), ErrCodeNotFound)
 		exitCLI(1)

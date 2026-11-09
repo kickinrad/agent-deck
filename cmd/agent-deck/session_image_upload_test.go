@@ -79,8 +79,12 @@ func TestSessionImageUploadCLIStartupPrune(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out, stderr, code := runAgentDeck(t, home, "list", "--json"); code != 0 {
-		t.Fatalf("startup: %d %s %s", code, out, stderr)
+		t.Fatalf("read-only startup: %d %s %s", code, out, stderr)
 	}
+	if _, err := os.Stat(old.Path); err != nil {
+		t.Fatalf("read-only list pruned upload: %v", err)
+	}
+	_ = uploadCLIImage(t, home, id, "new.png", "new")
 	if _, err := os.Stat(old.Path); !os.IsNotExist(err) {
 		t.Fatalf("old upload survives startup: %v", err)
 	}

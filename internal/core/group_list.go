@@ -53,7 +53,7 @@ type GroupItem struct {
 }
 
 func groupList(ctx context.Context, in GroupListIn) (GroupListOut, error) {
-	d, err := loadSessionData(in.Profile)
+	d, err := loadSessionDataReadOnly(in.Profile)
 	if err != nil {
 		return GroupListOut{}, err
 	}
