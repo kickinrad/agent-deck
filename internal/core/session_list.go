@@ -2,7 +2,9 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/health"
@@ -100,8 +102,15 @@ func sessionList(ctx context.Context, in SessionListIn) (SessionListOut, error) 
 	if in.AllProfiles {
 		return listAllProfiles(in)
 	}
-	storage, err := session.NewStorageWithProfile(in.Profile)
+	storage, err := session.NewLiveReadOnlyStorageWithProfile(in.Profile)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			resolved, resolveErr := session.ResolveProfileForStorage(in.Profile)
+			if resolveErr != nil {
+				return SessionListOut{}, resolveErr
+			}
+			return SessionListOut{Profile: resolved, Sessions: []SessionRow{}}, nil
+		}
 		return SessionListOut{}, &Error{Code: CodeStorage, Message: fmt.Sprintf("failed to initialize storage: %v", err), Cause: err}
 	}
 	instances, _, err := storage.LoadWithGroups()
@@ -225,7 +234,7 @@ func listAllProfiles(in SessionListIn) (SessionListOut, error) {
 	}
 	out := SessionListOut{ProfileCount: len(profiles), Profiles: []ProfileSessions{}, Sessions: []SessionRow{}}
 	for _, name := range profiles {
-		storage, err := session.NewStorageWithProfile(name)
+		storage, err := session.NewLiveReadOnlyStorageWithProfile(name)
 		if err != nil {
 			continue
 		}

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/asheshgoplani/agent-deck/internal/statedb"
 )
 
 // CLI subprocess tests for issue #928: `session move --to-profile`,
@@ -14,16 +16,21 @@ import (
 // These complement the unit tests in internal/session/profile_migrate_test.go
 // by exercising the actual binary, argv parsing, and JSON output shape.
 
-// bootstrapProfile runs a harmless `list` command in the named profile so
-// `~/.agent-deck/profiles/<name>/state.db` is created on disk. The cross-
+// bootstrapProfile creates storage in the named profile. The cross-
 // profile migration deliberately refuses missing target profiles, so every
 // test that migrates into "<dst>" must call this first.
 func bootstrapProfile(t *testing.T, home, profile string) {
 	t.Helper()
-	stdout, stderr, code := runAgentDeck(t, home, "-p", profile, "list", "--json")
-	if code != 0 {
-		t.Fatalf("bootstrap profile %q failed: code=%d\nstdout: %s\nstderr: %s",
-			profile, code, stdout, stderr)
+	db, err := statedb.Open(filepath.Join(home, ".local", "share", "agent-deck", "profiles", profile, "state.db"))
+	if err != nil {
+		t.Fatalf("bootstrap profile %q: %v", profile, err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("migrate profile %q: %v", profile, err)
+	}
+	if err := db.BindProfile(profile); err != nil {
+		t.Fatalf("bind profile %q: %v", profile, err)
 	}
 }
 

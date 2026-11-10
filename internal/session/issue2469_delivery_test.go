@@ -68,7 +68,7 @@ func DrainForPrompt_leafIsCheap(t *testing.T) bool {
 	return true
 }
 
-func TestIssue2469_StopHookBlocksOnlyForUrgent(t *testing.T) {
+func TestIssue2469_StopHookBlocksOnlyForTerminal(t *testing.T) {
 	reviewTestHome(t, "default")
 	parent := "parent-stop-tiers"
 	commitTestRecord(t, parent, TransitionNotificationEvent{ChildSessionID: "c1", ChildTitle: "board", Tier: TurnTierInfo, Text: "progress", LastOutputHash: "turn:a1"})
@@ -85,17 +85,23 @@ func TestIssue2469_StopHookBlocksOnlyForUrgent(t *testing.T) {
 	if err != nil || !blocked {
 		t.Fatalf("urgent record must block: blocked=%v err=%v", blocked, err)
 	}
-	if !strings.Contains(dec.Reason, "[urgent] lead (c2): error") || !strings.Contains(dec.Reason, "[info] board (c1): waiting") {
-		t.Fatalf("the block must carry the urgent record and the queued info:\n%s", dec.Reason)
+	if !strings.Contains(dec.Reason, "[urgent] lead (c2): error") || strings.Contains(dec.Reason, "[info] board (c1): waiting") {
+		t.Fatalf("the block must carry only the terminal record:\n%s", dec.Reason)
 	}
-	if InboxHasPending(parent) {
-		t.Fatal("block drained everything")
+	if !InboxHasPending(parent) {
+		t.Fatal("plain edge must stay queued for inbox drain")
+	}
+	if events, err := DrainInboxForParent(parent); err != nil || len(events) != 1 || events[0].ChildSessionID != "c1" {
+		t.Fatalf("plain edge must remain retrievable: events=%v err=%v", events, err)
 	}
 
-	// A legacy record (no tier) from an older producer still blocks.
+	// An untiered legacy turn is still a plain edge, not an asserted completion.
 	commitTestRecord(t, parent, TransitionNotificationEvent{ChildSessionID: "c3", ChildTitle: "old", LastOutputHash: "jsonl:100"})
-	if _, blocked, _ := DrainForStopHook(parent, false); !blocked {
-		t.Fatal("untiered record must block as before")
+	if _, blocked, _ := DrainForStopHook(parent, false); blocked {
+		t.Fatal("untiered record must not block")
+	}
+	if events, err := DrainInboxForParent(parent); err != nil || len(events) != 1 {
+		t.Fatalf("untiered record must remain retrievable: events=%v err=%v", events, err)
 	}
 }
 

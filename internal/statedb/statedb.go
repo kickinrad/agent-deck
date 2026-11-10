@@ -390,6 +390,11 @@ func OpenReadOnlyLive(dbPath string) (*StateDB, error) {
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil, err
 	}
+	// Without a WAL, the main file is complete. Immutable mode can read it
+	// even when the directory cannot create SQLite's WAL/SHM sidecars.
+	if _, err := os.Stat(dbPath + "-wal"); os.IsNotExist(err) {
+		return openReadOnlyDatabase(dbPath, true)
+	}
 	return openReadOnlyDatabase(dbPath, false)
 }
 
