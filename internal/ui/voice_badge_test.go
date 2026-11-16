@@ -25,7 +25,9 @@ func voiceHome(t *testing.T, st *voicestate.State, remotes map[string][]session.
 	forceTrueColorProfile()
 	h := newSeamATestHome()
 	h.width, h.height = 120, 40
-	inst := session.NewInstanceWithTool("conductor-inno", "/tmp/api", "shell")
+	// Not a conductor-* title: the fork shows conductors by bare name, which
+	// would shorten the title these width checks measure.
+	inst := session.NewInstanceWithTool("operator-inno1", "/tmp/api", "shell")
 	inst.Status = session.StatusRunning
 	inst.GroupPath = "work/voice"
 	other := session.NewInstanceWithTool("another one", "/tmp/api", "shell")
@@ -66,13 +68,13 @@ func voiceRemoteRow(t *testing.T, h *Home, rs session.RemoteSessionInfo, listWid
 }
 
 func micLocal(phase string) *voicestate.State {
-	return &voicestate.State{On: true, Phase: phase, Target: voicestate.Target{SessionID: "LOCAL", Title: "conductor-inno"}}
+	return &voicestate.State{On: true, Phase: phase, Target: voicestate.Target{SessionID: "LOCAL", Title: "operator-inno1"}}
 }
 
 func TestVoiceBadge_LocalRow(t *testing.T) {
 	h, inst := voiceHome(t, micLocal("listening"), nil)
 	row, _ := voiceLocalRow(t, h, inst, h.sessionsPaneWidth(), false)
-	if !strings.Contains(row, "conductor-inno 🎙 listening") {
+	if !strings.Contains(row, "operator-inno1 🎙 listening") {
 		t.Errorf("mic row lacks the badge right after the title:\n%s", row)
 	}
 	other := h.instances[1]
@@ -97,7 +99,7 @@ func TestVoiceBadge_LocalRowNeedsEmptyRemoteAndID(t *testing.T) {
 	if row, _ := voiceLocalRow(t, h, inst, h.sessionsPaneWidth(), false); strings.Contains(row, "🎙") {
 		t.Errorf("remote target lit the local row:\n%s", row)
 	}
-	byTitle := &voicestate.State{On: true, Phase: "listening", Target: voicestate.Target{SessionID: "someone-else", Title: "conductor-inno"}}
+	byTitle := &voicestate.State{On: true, Phase: "listening", Target: voicestate.Target{SessionID: "someone-else", Title: "operator-inno1"}}
 	h, inst = voiceHome(t, byTitle, nil)
 	if row, _ := voiceLocalRow(t, h, inst, h.sessionsPaneWidth(), false); strings.Contains(row, "🎙") {
 		t.Errorf("matched by title:\n%s", row)
@@ -173,9 +175,9 @@ func TestVoiceBadge_NarrowRow(t *testing.T) {
 // and a long title still truncates to keep the glyph (dropped last).
 func TestVoiceBadge_WordsNeverCutTheTitle(t *testing.T) {
 	h, inst := voiceHome(t, micLocal("listening"), nil)
-	inst.Title = "conductor-inno"
+	inst.Title = "operator-inno1"
 	row, _ := voiceLocalRow(t, h, inst, 34, false)
-	if !strings.Contains(row, "conductor-inno 🎙") || strings.Contains(row, "listening") {
+	if !strings.Contains(row, "operator-inno1 🎙") || strings.Contains(row, "listening") {
 		t.Errorf("want the full title and the glyph only:\n%s", row)
 	}
 	inst.Title = strings.Repeat("x", 80)
@@ -289,7 +291,7 @@ func TestVoiceBadge_WordsNeverCutTitleWithOtherBadges(t *testing.T) {
 	h.triggerBadges = map[string]triggers.Badge{inst.ID: {Count: 3}}
 	for w := 24; w <= 80; w++ {
 		row, _ := voiceLocalRow(t, h, inst, w, false)
-		if strings.Contains(row, "listening") && !strings.Contains(row, "conductor-inno ") {
+		if strings.Contains(row, "listening") && !strings.Contains(row, "operator-inno1 ") {
 			t.Errorf("width %d: words cut the title:\n%s", w, row)
 		}
 		if strings.Contains(row, "⚡") && !strings.Contains(row, "🎙") {

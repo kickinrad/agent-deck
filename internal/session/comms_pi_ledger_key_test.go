@@ -83,7 +83,14 @@ func TestLedgerConsumer_APiRunTheInboxShowedFirstKeepsItsText(t *testing.T) {
 			if path == "prompt" {
 				dl, _ = LedgerPromptContext(f.parent.ID, "hi", "", f.parent.Tool == "pi")
 			} else {
+				// Fork issue #16: Stop blocks only for a completion or a terminal
+				// child, so this plain edge stays queued for the next prompt.
 				dl, _ = LedgerStopDecision(f.parent.ID, false)
+				if dl.Text != "" || !InboxHasPending(f.parent.ID) {
+					t.Fatalf("a plain edge must stay queued past Stop: %q", dl.Text)
+				}
+				dl.Done(false)
+				dl, _ = LedgerPromptContext(f.parent.ID, "hi", "", f.parent.Tool == "pi")
 			}
 			if !strings.Contains(dl.Text, f.child.Title) {
 				t.Fatalf("the inbox shows the run the ledger does not hold yet: %q", dl.Text)

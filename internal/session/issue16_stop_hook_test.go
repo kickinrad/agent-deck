@@ -33,7 +33,7 @@ func TestIssue16_StopHookOnlyBlocksForAssertedOrTerminalChild(t *testing.T) {
 				t.Fatalf("Stop hook: blocked=%v, want %v, decision=%+v, err=%v", blocked, tc.block, dec, err)
 			}
 			if tc.block {
-				if !strings.HasPrefix(dec.Reason, "Child session(s) completed while you were busy") {
+				if !strings.HasPrefix(dec.Reason, "New session messages (normal inbox delivery;") {
 					t.Fatalf("completion header missing: %q", dec.Reason)
 				}
 				if _, again, err := DrainForStopHook(parent, true); err != nil || again {

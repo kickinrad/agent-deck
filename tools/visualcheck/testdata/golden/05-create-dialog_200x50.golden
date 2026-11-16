@@ -9,14 +9,14 @@
                                                          │                                                                                    │
                                                          │      in group: sessions                                                            │
                                                          │                                                                                    │
-                                                         │    ▶ Name:  > opencode-idle-2                                                      │
+                                                         │    ▶ Name:  > project                                                              │
                                                          │                                                                                    │
                                                          │      Agent:   claude     shell     gemini     opencode     opencode2               │
                                                          │               codex     pi     copilot     crush     muse     cursor agent         │
                                                          │               hermes     deepseek     omp                                          │
                                                          │               ←→ change   grey = not installed                                     │
                                                          │                                                                                    │
-                                                         │      Path:  > ~/project/work/opencode-idle                                         │
+                                                         │      Path:  > ~/project                                                            │
                                                          │                                                                                    │
                                                          │      Model ID:                                                                     │
                                                          │      > tool default (↓ to browse)                                                  │

@@ -51,10 +51,10 @@ func TestIssue3053_StopHookMessageHeading(t *testing.T) {
 	}
 }
 
-// TestIssue3053_StopHookReplyDeliveredOnce checks that an urgent reply blocks
-// Stop once under the normal-delivery heading and is not redelivered. The
-// exactly-once drain already holds on main; this guards it alongside the new
-// heading.
+// TestIssue3053_StopHookReplyDeliveredOnce checks that an urgent reply is
+// delivered exactly once. Under the fork's sentinel-only Stop hook (fork issue
+// #16) a reply does not block Stop: it stays queued for the inbox drain, which
+// hands it over once under the normal-delivery heading.
 func TestIssue3053_StopHookReplyDeliveredOnce(t *testing.T) {
 	inboxTestHome(t)
 	parent := "parent-stop-reply"
@@ -66,16 +66,20 @@ func TestIssue3053_StopHookReplyDeliveredOnce(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	dec, blocked, err := DrainForStopHook(parent, false)
-	if err != nil || !blocked || dec.Decision != "block" {
-		t.Fatalf("expected block for urgent reply: dec=%+v blocked=%v err=%v", dec, blocked, err)
+	if dec, blocked, err := DrainForStopHook(parent, false); err != nil || blocked || dec.Decision != "" {
+		t.Fatalf("a reply must not block Stop: dec=%+v blocked=%v err=%v", dec, blocked, err)
 	}
+	got, err := DrainInboxForParent(parent)
+	if err != nil || len(got) != 1 || got[0].ChildSessionID != "sender" {
+		t.Fatalf("reply not delivered by the inbox drain: events=%+v err=%v", got, err)
+	}
+	text := FormatCompletionsForInjection(got)
 	for _, want := range []string{"New session messages (normal inbox delivery;", "reply from=sender reviewer: waiting", "Please review the patch."} {
-		if !strings.Contains(dec.Reason, want) {
-			t.Errorf("reason missing %q:\n%s", want, dec.Reason)
+		if !strings.Contains(text, want) {
+			t.Errorf("delivery missing %q:\n%s", want, text)
 		}
 	}
-	if again, blocked, err := DrainForStopHook(parent, true); err != nil || blocked || again.Reason != "" || again.Decision != "" {
-		t.Fatalf("second drain must not redeliver: dec=%+v blocked=%v err=%v", again, blocked, err)
+	if again, err := DrainInboxForParent(parent); err != nil || len(again) != 0 {
+		t.Fatalf("second drain must not redeliver: events=%+v err=%v", again, err)
 	}
 }
