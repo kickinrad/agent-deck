@@ -401,7 +401,13 @@ func handleSessionSend(profile string, args []string) {
 			acceptanceGuard.Release()
 		}
 		telemetry.ErrorOccurred(telemetry.AreaSend, telemetry.KindTimeout, inst.Tool)
-		out.Error(fmt.Sprintf("timeout waiting for agent: %v", err), ErrCodeInvalidOperation)
+		msg := fmt.Sprintf("timeout waiting for agent: %v", err)
+		if session.IsCodexCompatible(inst.Tool) {
+			// The readiness wait runs before the acceptance lock (#3054), so a
+			// busy Codex turn surfaces here; name the busy-safe path.
+			msg += "; retry with --queue to deliver when the target is idle"
+		}
+		out.Error(msg, ErrCodeInvalidOperation)
 		exitCLI(1)
 	}
 	readyWaited := false

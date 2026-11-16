@@ -121,7 +121,10 @@ func TestBusyCodexSendNamesQueueAfterAcceptanceLockTimeout(t *testing.T) {
 	defer lock.Release()
 
 	stdout, stderr, code := runAgentDeck(t, root, "session", "send", inst.ID, "hold", "--timeout=100ms")
-	if code != 1 || !strings.Contains(stdout+stderr, "Codex acceptance lock timed out") || !strings.Contains(stdout+stderr, "--queue") {
+	// Which wait expires first depends on the pane: the readiness wait runs
+	// before the acceptance lock (#3054). Either refusal must name --queue.
+	refused := strings.Contains(stdout+stderr, "Codex acceptance lock timed out") || strings.Contains(stdout+stderr, "timeout waiting for agent")
+	if code != 1 || !refused || !strings.Contains(stdout+stderr, "--queue") {
 		t.Fatalf("busy Codex send: exit %d, stdout %q, stderr %q; want timeout with --queue hint", code, stdout, stderr)
 	}
 }
