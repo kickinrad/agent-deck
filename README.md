@@ -21,6 +21,12 @@
 > [asheshgoplani/agent-deck](https://github.com/asheshgoplani/agent-deck). Each release is an
 > upstream release plus the fork's patches, tagged `v<upstream>-kickinrad.<n>` and published as
 > a GitHub pre-release. Install it with mise (see [Installation](#installation)).
+>
+> **Releasing the fork:** rebase the fork's patches onto the new upstream release tag and
+> merge the result into `stack`. Tag that commit `v<upstream>-kickinrad.<n>` and push the tag.
+> When GitHub Actions runs on the fork, the tag push builds and publishes the release. Otherwise
+> run `make release-local` on the tagged commit, check the draft's assets, and publish it as a
+> pre-release with `gh release edit <tag> --draft=false --latest=false`.
 
 Agent Deck runs all your AI coding agents (Claude Code, Codex, Gemini CLI, OpenCode and more) in one terminal and shows which ones are working, waiting, or done.
 
