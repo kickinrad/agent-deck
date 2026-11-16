@@ -161,9 +161,10 @@ func (n *TransitionNotifier) fireReservedWakeNudge(parent *Instance, event Trans
 }
 
 // parentIsNudgeableIdle reports whether parent is safe to wake with a send-keys
-// nudge: it must be a wake target for the record (see isWakeTarget) AND
-// currently idle/waiting, NOT mid-turn. A "reply" target (comms redesign PR5)
-// is the session whose tagged send the child just answered (a sibling sender, or the child's own
+// nudge: it must be a wake target (a conductor, or a Claude parent that opted
+// in with [inbox] wake_parents; see isWakeTarget) AND currently idle/waiting,
+// NOT mid-turn. A "reply" target (comms redesign PR5) is the session whose
+// tagged send the child just answered (a sibling sender, or the child's own
 // parent when it asked; see parentWakeEvent): it asked, so it is woken
 // whatever its title, but only when it is Claude-compatible (its prompt-time
 // drain injects the reply). A send-keys into a RUNNING pane only queues the
@@ -200,10 +201,9 @@ const inboxWakeKindDigest = "digest"
 // isWakeTarget reports whether target may be woken at all for a record of
 // targetKind. A reply wake is typed into the pane and carries the child's
 // text: only a Claude-compatible pane drains it at prompt time, and a shell
-// would execute it. Any other record wakes a conductor or any other parent
-// that runs an agent: an explicit parent link is delegation, so conductor
-// residency does not limit who receives an actionable child turn, but a plain
-// shell would execute the typed line. The digest wakes only a conductor.
+// would execute it. Any other record wakes a conductor, and (issue #3131)
+// an idle Claude-compatible parent whose [inbox] wake_parents is on (off by
+// default). The digest wakes only a conductor.
 func isWakeTarget(target *Instance, targetKind string) bool {
 	switch targetKind {
 	case InboxTargetKindReply:
@@ -214,7 +214,7 @@ func isWakeTarget(target *Instance, targetKind string) bool {
 	if isConductorSession(target) {
 		return true
 	}
-	return target.Tool != "shell"
+	return IsClaudeCompatible(target.Tool) && ResolveInboxConfigForInstance(target).GetWakeParents()
 }
 
 // sendWakeNudge fires one best-effort wake into the parent conductor's pane and
