@@ -220,18 +220,18 @@ changelog-release:
 # tap at all.
 release-local:
 	@echo "=== Pre-flight checks ==="
-	@which goreleaser > /dev/null || (echo "ERROR: goreleaser not found. Run: brew install goreleaser" && exit 1)
+	@goreleaser --version > /dev/null 2>&1 || (echo "ERROR: goreleaser not runnable. Run: mise use -g goreleaser@latest" && exit 1)
 	@test -n "$$GITHUB_TOKEN" || (echo "ERROR: GITHUB_TOKEN not set" && exit 1)
 	@TAG=$$(git describe --tags --exact-match 2>/dev/null) || (echo "ERROR: HEAD is not tagged. Run: git tag vX.Y.Z" && exit 1); \
 	CODE_VERSION=$$(grep 'var Version' cmd/agent-deck/main.go | sed 's/.*"\(.*\)".*/\1/'); \
 	TAG_VERSION=$${TAG#v}; \
-	if [ "$$TAG_VERSION" != "$$CODE_VERSION" ]; then \
-		echo "ERROR: Tag $$TAG ($$TAG_VERSION) != code Version $$CODE_VERSION"; \
-		exit 1; \
-	fi; \
-	echo "Version: $$CODE_VERSION"
-	@echo "=== Running tests ==="
-	go test -race -timeout 20m ./...
+	case "$$TAG_VERSION" in \
+		"$$CODE_VERSION"-kickinrad.[0-9]*) ;; \
+		*) echo "ERROR: Tag $$TAG is not v$$CODE_VERSION-kickinrad.<n> (fork tags ship on an unmodified upstream Version)"; exit 1 ;; \
+	esac; \
+	echo "Version: $$TAG_VERSION"
+	@echo "=== Running tests (in Docker: tests never run on the host) ==="
+	$(MAKE) verify-docker
 	@echo "=== Running GoReleaser ==="
 	goreleaser release --clean
 	@echo "=== Draft release built ==="
@@ -239,8 +239,8 @@ release-local:
 	@echo "Verify the assets, then publish it yourself — CI's publish step does not run for a local release:"
 	@echo "  gh release view $$(git describe --tags --exact-match) --repo kickinrad/agent-deck"
 	@echo "  gh release edit $$(git describe --tags --exact-match) --repo kickinrad/agent-deck --draft=false --latest=false"
-	@echo "Note: no SLSA provenance and no Homebrew tap update happen for a local release —"
-	@echo "both live in .github/workflows/release.yml. Prefer pushing the tag and letting CI do it."
+	@echo "Note: no SLSA provenance happens for a local release; it lives in"
+	@echo ".github/workflows/release.yml. Prefer pushing the tag and letting CI do it."
 
 # Web UI test targets
 # Vitest (unit) + Playwright (e2e + screenshot regression). Both run against
