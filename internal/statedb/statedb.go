@@ -393,12 +393,23 @@ func OpenReadOnlyLive(dbPath string) (*StateDB, error) {
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil, err
 	}
-	// Without a WAL, the main file is complete. Immutable mode can read it
-	// even when the directory cannot create SQLite's WAL/SHM sidecars.
-	if _, err := os.Stat(dbPath + "-wal"); os.IsNotExist(err) {
+	live, err := openReadOnlyDatabase(dbPath, false)
+	if err == nil {
+		// A live reader may still fail on its first read when the directory
+		// cannot hold SQLite's WAL/SHM sidecars; probe before handing it out.
+		var n int
+		if err = live.db.QueryRow(`SELECT COUNT(1) FROM sqlite_master`).Scan(&n); err == nil {
+			return live, nil
+		}
+		_ = live.db.Close()
+	}
+	// Without a WAL, the main file is complete, so immutable mode reads it
+	// even where the sidecars cannot be created. Only as a fallback: an
+	// immutable handle never sees later writes, and callers may cache it.
+	if _, statErr := os.Stat(dbPath + "-wal"); os.IsNotExist(statErr) {
 		return openReadOnlyDatabase(dbPath, true)
 	}
-	return openReadOnlyDatabase(dbPath, false)
+	return nil, fmt.Errorf("statedb: open live read-only: %w", err)
 }
 
 func openReadOnlyDatabase(dbPath string, immutable bool) (*StateDB, error) {
