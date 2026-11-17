@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"github.com/asheshgoplani/agent-deck/internal/testutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,7 +121,10 @@ func TestBusyCodexSendNamesQueueAfterAcceptanceLockTimeout(t *testing.T) {
 	defer lock.Release()
 
 	stdout, stderr, code := runAgentDeck(t, root, "session", "send", inst.ID, "hold", "--timeout=100ms")
-	if code != 1 || !strings.Contains(stdout+stderr, "Codex acceptance lock timed out") || !strings.Contains(stdout+stderr, "--queue") {
+	// Which wait expires first depends on the pane: the readiness wait runs
+	// before the acceptance lock (#3054). Either refusal must name --queue.
+	refused := strings.Contains(stdout+stderr, "Codex acceptance lock timed out") || strings.Contains(stdout+stderr, "timeout waiting for agent")
+	if code != 1 || !refused || !strings.Contains(stdout+stderr, "--queue") {
 		t.Fatalf("busy Codex send: exit %d, stdout %q, stderr %q; want timeout with --queue hint", code, stdout, stderr)
 	}
 }
@@ -130,6 +134,7 @@ func TestBusyCodexSendNamesQueueAfterAcceptanceLockTimeout(t *testing.T) {
 // rollout generation is unavailable"). The send must adopt the one thread the
 // live process owns, persist it and point the pane identity at it.
 func TestIssue2549_SendAdoptsRotatedLiveThread(t *testing.T) {
+	testutil.RequireTmux(t)
 	for _, oldHasRollout := range []bool{false, true} {
 		name := "old id without rollout"
 		if oldHasRollout {
@@ -171,6 +176,7 @@ func TestIssue2549_SendAdoptsRotatedLiveThread(t *testing.T) {
 // while the old rollout is still open) must not rebind: the send keeps
 // refusing as provably unavailable.
 func TestIssue2549_AmbiguousLiveThreadsDoNotRebind(t *testing.T) {
+	testutil.RequireTmux(t)
 	root := t.TempDir()
 	home := filepath.Join(root, "codex")
 	t.Setenv("CODEX_HOME", home)
@@ -197,6 +203,7 @@ func TestIssue2549_AmbiguousLiveThreadsDoNotRebind(t *testing.T) {
 
 // A live thread another live session already owns is never adopted.
 func TestIssue2549_PeerOwnedLiveThreadIsNotAdopted(t *testing.T) {
+	testutil.RequireTmux(t)
 	root := t.TempDir()
 	home := filepath.Join(root, "codex")
 	t.Setenv("CODEX_HOME", home)
@@ -224,6 +231,7 @@ func TestIssue2549_PeerOwnedLiveThreadIsNotAdopted(t *testing.T) {
 // A Guardian review or subagent thread the process holds open is never an
 // operator thread (#2529), so it is not adopted either.
 func TestIssue2549_SubagentLiveThreadIsNotAdopted(t *testing.T) {
+	testutil.RequireTmux(t)
 	root := t.TempDir()
 	home := filepath.Join(root, "codex")
 	t.Setenv("CODEX_HOME", home)

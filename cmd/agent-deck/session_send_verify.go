@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -81,8 +82,24 @@ type sendRetryOptions struct {
 	composerPasteFreeBeforeSend bool
 
 	// suggestionShownBeforeSend mirrors send.ComposerGuardResult.SuggestionShown
-	// for the initial submit (send.TypeAndSubmit).
+	// for the initial submit (send.TypeAndSubmitReport).
 	suggestionShownBeforeSend bool
+
+	// composerEmptyBeforeSend mirrors send.ComposerGuardResult.ComposerEmpty:
+	// the guard saw a visible, empty input box just before the send. Only
+	// then may a leftover be reported verified as this send's own text
+	// (send.ObserveComposer). It never authorises a key press.
+	composerEmptyBeforeSend bool
+	// composerBody reads the target tool's whole input box
+	// (composerFullBodyReaderFor); nil when the tool has no full-body
+	// reader, in which case a send that typed and did not submit carries no
+	// composer_residue (unknown).
+	composerBody send.ComposerFullBodyReader
+	// ownedPasteChip is the exact paste chip label this send's own paste
+	// showed before Enter (send.SubmitReport.OwnedChip), set by
+	// sendWithRetryTarget after the initial submit. Only that chip may be
+	// reported as verified ours; "" means no chip is.
+	ownedPasteChip string
 
 	// targetBusyByHook, when non-nil, reports the target's hook-driven busy
 	// state (the #1578 `--defer-if-busy` signal) as (busy, known), read fresh
@@ -132,10 +149,15 @@ func (o sendRetryOptions) hookBusyNow() bool {
 	return known && busy
 }
 
-// sendInitialKeysChecked is the initial submit of `session send`:
-// send.TypeAndSubmit, shared with the launch path (#2148 item 4b).
-func sendInitialKeysChecked(target sendRetryTarget, message string, expectedBreaks int, suggestionShown bool) error {
-	return send.TypeAndSubmit(target, message, expectedBreaks, suggestionShown)
+// hookIdleNow reports whether the hook signal is fresh AND not busy: the
+// positive "this target's turn has ended" reading. Unknown and "no probe
+// wired" read false, like hookBusyNow.
+func (o sendRetryOptions) hookIdleNow() bool {
+	if o.targetBusyByHook == nil {
+		return false
+	}
+	busy, known := o.targetBusyByHook()
+	return known && !busy
 }
 
 // sendWithRetryTarget sends the message and runs the bounded submit
@@ -179,9 +201,22 @@ func sendWithRetryTarget(target sendRetryTarget, message string, skipVerify bool
 	// is the target taking this message up (submitted).
 	hookBusyBeforeSend := opts.hookBusyNow()
 
-	if err := sendInitialKeysChecked(target, message, opts.expectedPasteBreaks, opts.suggestionShownBeforeSend); err != nil {
+	report, err := send.TypeAndSubmitReport(target, message, opts.expectedPasteBreaks, opts.suggestionShownBeforeSend, opts.composerEmptyBeforeSend, opts.composerBody)
+	opts.ownedPasteChip = report.OwnedChip
+	if err != nil {
+		// A pre-Enter check withheld Enter after the body was typed, or the
+		// Enter itself failed after a full type. The typed text stays where
+		// it is (agent-deck never deletes); say what the input box holds.
+		// The input-prompt guard's own refusal comes first: when it withheld
+		// the final Enter (a menu opened after the post-paste check passed)
+		// the transport reports a failed Enter, but the verdict, and its
+		// typed-not-submitted evidence, are the guard's.
 		if opts.promptGuard != nil && opts.promptGuard.refused {
-			return opts.promptGuard.refusal()
+			return guardRefusalOutcome(target, message, opts)
+		}
+		var notSubmitted *send.NotSubmittedError
+		if errors.As(err, &notSubmitted) {
+			return notSubmittedOutcome(notSubmitted)
 		}
 		// A refused over-long line is a distinct, actionable outcome: the
 		// transport typed nothing, so the composer is untouched and the
@@ -190,7 +225,10 @@ func sendWithRetryTarget(target sendRetryTarget, message string, skipVerify bool
 		if errors.Is(err, tmux.ErrCanonicalLineOverflow) {
 			return deliveryLineTooLong, fmt.Errorf("message not delivered: %w", err)
 		}
-		return deliverySendFailed, fmt.Errorf("failed to send message: %w", err)
+		// Any other transport failure may have come after typing began (a
+		// chunk failed mid-paste, or the final Enter failed): look at the
+		// composer and say what is in it. Never deletes.
+		return transportFailureOutcome(target, message, opts, fmt.Errorf("failed to send message: %w", err))
 	}
 
 	if skipVerify {
@@ -265,9 +303,13 @@ func sendWithRetryTarget(target sendRetryTarget, message string, skipVerify bool
 	// the positive submission signals; obs decides what an exhausted budget
 	// means.
 	obs := newSendObserver(opts.tool, message, arrivalBaseline, true, hookBusyBeforeSend)
+	// stall is ASK-200: an idle Claude holding this send in a queue that
+	// no turn will drain. It may press the one Enter the attribution gate
+	// withholds at the queued hint (see stalledQueueFlush).
+	var stall stalledQueueFlush
 	for retry := 0; retry < opts.maxRetries; retry++ {
 		if opts.promptGuard != nil && opts.promptGuard.refused {
-			return opts.promptGuard.refusal()
+			return guardRefusalOutcome(target, message, opts)
 		}
 		time.Sleep(opts.checkDelay)
 
@@ -284,6 +326,7 @@ func sendWithRetryTarget(target sendRetryTarget, message string, skipVerify bool
 		captured, captureErr := target.CapturePaneFresh()
 		paneNow := send.CaptureOutcome(captured, captureErr)
 		obs.Observe(paneNow)
+		opts.forgetOwnedChipIfEmptied(captured, captureErr, message)
 		if paneNow.OK {
 			content := tmux.StripANSI(captured)
 			unsentPromptDetected = send.ComposerHoldsPasteMarker(captured, tmux.StripANSI) || send.ComposerHoldsUnsentMessage(captured, message, tmux.StripANSI)
@@ -296,6 +339,10 @@ func sendWithRetryTarget(target sendRetryTarget, message string, skipVerify bool
 					sawTokenMovement = true
 				}
 			}
+		}
+		if stall.observe(target, paneNow, opts, time.Now()) {
+			// Give Claude a frame to take the flushed queue up.
+			continue
 		}
 
 		// Issue #1978 / #2033: the hook-driven busy signal (the one
@@ -393,7 +440,7 @@ func sendWithRetryTarget(target sendRetryTarget, message string, skipVerify bool
 		}
 	}
 	if opts.promptGuard != nil && opts.promptGuard.refused {
-		return opts.promptGuard.refusal()
+		return guardRefusalOutcome(target, message, opts)
 	}
 
 	// Budget exhausted without a confirmed submit. The verdict follows the
@@ -411,8 +458,17 @@ func sendWithRetryTarget(target sendRetryTarget, message string, skipVerify bool
 			// is not this send arriving (#1978).
 			obs.NoteBodyArrived()
 		}
+		if stall.heldIdle {
+			// ASK-200: still parked in Claude's queue on an idle session
+			// (after the flush Enter, or before it could be pressed). Never
+			// exit 0 for a message no turn will take up.
+			return deliveryTypedNotSubmitted, fmt.Errorf("message not submitted: Claude holds it in its queued messages "+
+				"(\"%s\") while the session is idle, and the flush Enter did not take it up within %d checks (ASK-200)",
+				send.ClaudeQueuedHint, opts.maxRetries)
+		}
 		final, finalErr := target.CapturePaneFresh()
 		obs.Observe(send.CaptureOutcome(final, finalErr))
+		opts.forgetOwnedChipIfEmptied(final, finalErr, message)
 		v := obs.Verdict(opts.maxRetries, verificationWindow(opts.maxRetries, opts.checkDelay))
 		switch v.Outcome {
 		case send.OutcomeConfirmed:
@@ -421,7 +477,8 @@ func sendWithRetryTarget(target sendRetryTarget, message string, skipVerify bool
 			// moving out of view is not this message's turn).
 			return deliverySubmitted, nil
 		case send.OutcomeFailed:
-			return deliveryFailure(v, opts.maxRetries)
+			delivery, err := deliveryFailure(v, opts.maxRetries)
+			return reportIfStuck(target, message, opts, delivery, err)
 		case send.OutcomeDeliveredUnconfirmed:
 			// The body reached the pane and Enter was sent; nothing showed
 			// the harness taking it, nothing showed it failing. Delivered,
@@ -608,6 +665,14 @@ func verifyContentArrival(target sendRetryTarget, message string, opts sendRetry
 	}
 
 	checks := opts.verificationChecks(false)
+	// Opt-in Codex submit retry (docs/codex-submit-retry.md). Off by default;
+	// with the switch unset none of the state below is read.
+	retryCodexSubmit := opts.tool == "codex" && os.Getenv("AGENTDECK_CODEX_SUBMIT_RETRY") == "1"
+	attrib := send.EnterAttribution{Message: message}
+	// prevUnsent: the previous capture, one checkDelay earlier, already showed
+	// this send's text unsent in the composer. codexRetried: the one retry
+	// this send is allowed has been pressed.
+	prevUnsent, codexRetried := false, false
 
 	// obs is the reader of record for the verdict (issue #1793): it sees
 	// every frame this loop captures and decides what an exhausted budget
@@ -632,8 +697,25 @@ func verifyContentArrival(target sendRetryTarget, message string, opts sendRetry
 		if baseline.paneOK {
 			raw, captureErr := target.CapturePaneFresh()
 			obs.Observe(send.CaptureOutcome(raw, captureErr))
+			opts.forgetOwnedChipIfEmptied(raw, captureErr, message)
 			if obs.TurnStarted() {
 				return deliverySubmitted, nil
+			}
+			// Retry only a submit that was really swallowed. The first capture
+			// comes right after the paste and its Enter, when Codex often still
+			// shows the text because it has not processed that Enter yet, so
+			// the text must be unsent in two captures a checkDelay apart, on a
+			// frame that does not already show the turn starting (checked
+			// above). One retry per send, never on the last check.
+			if retryCodexSubmit {
+				unsent := captureErr == nil && send.ComposerHoldsUnsentMessage(raw, message, tmux.StripANSI)
+				if unsent && prevUnsent && !codexRetried && i < checks-1 {
+					guard := &promptGuardTarget{sendRetryTarget: target, tool: "codex"}
+					if guard.check(raw, nil) == nil {
+						codexRetried = attrib.NudgeEnter(guard, send.Captured(raw), tmux.StripANSI)
+					}
+				}
+				prevUnsent = unsent
 			}
 			if n, markers, ok := paneArrivalCounts(raw, message); captureErr == nil && ok {
 				content := tmux.StripANSI(raw)
@@ -697,12 +779,14 @@ func verifyContentArrival(target sendRetryTarget, message string, opts sendRetry
 		case send.OutcomeConfirmed:
 			return deliverySubmitted, nil
 		case send.OutcomeFailed:
-			return deliveryFailure(v, checks)
+			delivery, err := deliveryFailure(v, checks)
+			return reportIfStuck(target, message, opts, delivery, err)
 		}
 		if opts.tool == "pi" && piComposerHoldsMessage(lastContent, message) {
 			// Pi's editor is border-framed rather than glyph-led, so the
 			// generic composer check cannot see it holding the body.
-			return composerHoldsFailure(checks)
+			delivery, err := composerHoldsFailure(checks)
+			return reportIfStuck(target, message, opts, delivery, err)
 		}
 		return deliveryDelivered, nil
 	}

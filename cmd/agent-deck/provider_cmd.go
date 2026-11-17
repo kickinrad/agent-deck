@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -84,6 +85,54 @@ func installOnSandbox(ctx context.Context, name string, rc session.RemoteConfig)
 	return nil
 }
 
+// providerWorkTracker counts provider work in flight (a provisioning with
+// its rollback, a destroy), so a signal handler can wait for it before the
+// CLI exits instead of cutting a provider destroy off.
+type providerWorkTracker struct {
+	mu   sync.Mutex
+	n    int
+	idle chan struct{} // closed when n drops to 0
+}
+
+// providerWork tracks this process's provider work.
+var providerWork = &providerWorkTracker{}
+
+// begin marks one piece of work and returns its (idempotent) end.
+func (w *providerWorkTracker) begin() func() {
+	w.mu.Lock()
+	if w.n == 0 {
+		w.idle = make(chan struct{})
+	}
+	w.n++
+	w.mu.Unlock()
+	return sync.OnceFunc(func() {
+		w.mu.Lock()
+		w.n--
+		if w.n == 0 {
+			close(w.idle)
+		}
+		w.mu.Unlock()
+	})
+}
+
+func (w *providerWorkTracker) busy() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.n > 0
+}
+
+// done is closed when no work is in flight (already closed when idle).
+func (w *providerWorkTracker) done() <-chan struct{} {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.n == 0 {
+		c := make(chan struct{})
+		close(c)
+		return c
+	}
+	return w.idle
+}
+
 // providerSignalContext is cancelled by SIGINT/SIGTERM so a long create can
 // be interrupted (Provision still rolls back on its own context).
 func providerSignalContext() (context.Context, context.CancelFunc) {
@@ -101,6 +150,10 @@ func handleProvider(profile string, args []string) {
 		code = runProviderList(args[1:])
 	case "test":
 		code = runProviderTest(profile, args[1:])
+	case "connect":
+		code = runProviderConnect(profile, args[1:])
+	case "disconnect":
+		code = runProviderConnect(profile, append(append([]string{}, args[1:]...), "--disconnect"))
 	default:
 		fmt.Fprintf(os.Stderr, "Error: unknown provider command %q\n\n", args[0])
 		printProviderUsage(os.Stderr)
@@ -121,6 +174,11 @@ func printProviderUsage(w io.Writer) {
 	fmt.Fprintln(w, "  list [--json]             List configured providers and whether they answer")
 	fmt.Fprintln(w, "  test <name> [--create]    Run the provider's list (and with --create a")
 	fmt.Fprintln(w, "                            create -> status -> destroy round trip)")
+	fmt.Fprintln(w, "  connect azure [flags]     Log in to Azure, set up a resource group and a")
+	fmt.Fprintln(w, "                            service principal, install the azure-vm provider")
+	fmt.Fprintln(w, "                            ([--subscription id] [--tenant t] [--json] ...)")
+	fmt.Fprintln(w, "  disconnect azure [--yes]  Remove that service principal and the local")
+	fmt.Fprintln(w, "                            Azure settings (= connect azure --disconnect)")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Related:")
 	fmt.Fprintln(w, "  agent-deck remote add --provider <name> [--name x]   Create a sandbox and register it")
@@ -337,6 +395,7 @@ func provisionRemote(profile, providerName, name string) (*provider.Provisioned,
 		fmt.Fprintln(providerDeps.stderr, "Error: remote name must use letters, digits, '-' and '_' and not match a remote management command")
 		return nil, 1
 	}
+	defer providerWork.begin()()
 	ctx, stop := providerSignalContext()
 	defer stop()
 	p, err := provider.Provision(ctx, provider.ProvisionOptions{
@@ -354,8 +413,21 @@ func provisionRemote(profile, providerName, name string) (*provider.Provisioned,
 	return p, 0
 }
 
+// launchValueFlags are the launch flags that take a value, so the argument
+// after one (`-m "--provider ..."`) is that value, never a flag of ours.
+var launchValueFlags = sync.OnceValue(func() map[string]bool {
+	out := map[string]bool{}
+	for _, f := range creationCommandFields("launch") {
+		if f.TakesValue {
+			out[f.Name] = true
+		}
+	}
+	return out
+})
+
 // splitLaunchProviderArgs pulls --provider and --name out of launch args
-// (before any "--"); rest is forwarded to the remote launch unchanged.
+// (before any "--"); rest is forwarded to the remote launch unchanged,
+// including the values of launch's own value flags.
 func splitLaunchProviderArgs(args []string) (providerName, name string, rest []string, ok bool, err error) {
 	set := func(key, value string) {
 		if key == "provider" {
@@ -364,11 +436,17 @@ func splitLaunchProviderArgs(args []string) (providerName, name string, rest []s
 			name = value
 		}
 	}
-	pending := "" // flag waiting for its value in the next argument
+	pending := ""        // flag waiting for its value in the next argument
+	launchValue := false // the next argument is a launch flag's value
 	for i, a := range args {
 		if pending != "" {
 			set(pending, a)
 			pending = ""
+			continue
+		}
+		if launchValue {
+			rest = append(rest, a)
+			launchValue = false
 			continue
 		}
 		if a == "--" {
@@ -378,6 +456,7 @@ func splitLaunchProviderArgs(args []string) (providerName, name string, rest []s
 		key, value, hasValue := strings.Cut(strings.TrimLeft(a, "-"), "=")
 		if !strings.HasPrefix(a, "-") || (key != "provider" && key != "name") {
 			rest = append(rest, a)
+			launchValue = strings.HasPrefix(a, "-") && !hasValue && launchValueFlags()[key]
 			continue
 		}
 		if !hasValue {
@@ -466,6 +545,26 @@ func runRemoteDestroy(args []string) int {
 		return 1
 	}
 
+	// Held until the destroy ends: a second destroy of this remote (here,
+	// in the TUI or another CLI) or a create of the same name is refused.
+	unlock, err := provider.LockRemote(name)
+	if err != nil {
+		fmt.Fprintf(errOut, "Error: %v\nNothing was changed.\n", err)
+		return 1
+	}
+	defer unlock()
+	// Read the remote again under the lock: a destroy that just ended may
+	// have removed it.
+	if cfg, err = session.ReloadUserConfig(); err != nil {
+		fmt.Fprintf(errOut, "Error: loading config: %v\n", err)
+		return 1
+	}
+	if rc, ok = cfg.Remotes[name]; !ok || !provider.IsSandbox(rc) {
+		fmt.Fprintf(errOut, "Error: remote '%s' is no longer a configured sandbox (another destroy may have removed it). Nothing was changed.\n", name)
+		return 1
+	}
+
+	defer providerWork.begin()()
 	ctx, stop := providerSignalContext()
 	defer stop()
 	listCtx, cancelList := context.WithTimeout(ctx, rc.GetCommandTimeout())

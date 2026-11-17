@@ -5,7 +5,7 @@ Complete reference for all agent-deck CLI commands.
 ## Table of Contents
 
 - [Global Options](#global-options)
-- [Basic Commands](#basic-commands)
+- [Basic Commands](#basic-commands) (incl. `update`, `whats-new`, `feedback`)
 - [Shell Completion](#shell-completion)
 - [Web Command](#web-command)
 - [Session Commands](#session-commands)
@@ -102,6 +102,7 @@ Notes:
 - `--account` requires an explicit name. If the next token is another launch flag, launch stops with an error before resolving a fallback account or creating a session; use `--account=<name>` when a name intentionally begins with a dash.
 - `--hint/--tag/--ticket/--why` (also on `add`): durable recall hints written to state.db at creation (`docs/recall.md`). `launch` additionally derives `purpose` from the first line of `-m` and both commands derive `parent` for a child; an explicit `--hint purpose=` wins. Echoed in `--json` as `hints` and `tags`.
 - `--trust-folder` (also on `add`): add the session's folder to `[security] trusted_folders`, so agent-deck pre-trusts it for Claude, Codex and Cursor and sources a relative `env_file` from it. Needed on a new install (v1.16.34+, where `auto_trust_folders` is off) for a headless launch in a folder the tool has never been allowed to open; without it Claude shows its "trust the files in this folder?" prompt first and the launch prints a note on stderr and, with `--json`, adds `"warnings": [{"code": "FOLDER_NOT_TRUSTED", "folder": "<dir>", "hint": "..."}]` to the result (a queued start logs `queued_start_folder_not_trusted` with the same code). The flag edits config.toml in place, so comments and layout are kept. Installs from before v1.16.34 keep pre-trusting every folder (config-reference.md, `[security]`).
+- Kickoff envelope (#3131): when `launch` runs inside a session and links that session as the parent, a Claude child's initial message starts with the same `[agent-deck from:<parent id>]` line `session send` uses. The child's first turn is then a reply to its parent: an urgent result (completion sentinel, question, error) wakes an idle Claude parent even when it is not a conductor, and a plain answer stays info (unless the parent's `[inbox] wake_on` includes `info`). `--no-tag` or `[send] tag_sends = false` turns it off. Never tagged: a launch from a human shell, a `--parent` that is not the calling session (including a nested launch linked to the caller's own parent), a non-Claude parent or child, a bare slash command, and a child whose turns are not reported (`--no-transition-notify`, or `[notifications]` transition events off), because such a child answers an enveloped message with an explicit `session send`. A typed wake into a Claude session that is not a conductor (inbox and `remote drain` wakes) is sent with `--require-input-prompt`, so it is skipped while that session shows a menu or a permission dialog, and, like every wake, it never types over text left in the input box; the record then arrives on the session's next turn. `--json` carries `"tagged": true|false` when there is a message.
 - `--no-identity` (also on `add`): skip the harness identity injection for this session only. By default every spawn tells the model it runs inside agent-deck, its session metadata and how to use the CLI (`[launch] inject_identity` in config-reference.md, `documentation/HARNESS_IDENTITY.md`). Persisted, so restarts honour it.
 
 ### accounts - List named account slots
@@ -117,9 +118,13 @@ Each row reports the slot name, its config dir, and whether that directory exist
 ### list - List sessions
 
 ```bash
-agent-deck list [--json] [--all]
+agent-deck list [--json] [--all] [--no-archived]
 agent-deck ls  # Alias
 ```
+
+`--no-archived` leaves archived sessions out before any status work, so a poller that only needs live sessions (a dashboard polling `list --json --no-archived`) pays neither their status pass nor their encoding. Without it every session is listed, archived ones with `"archived": true`. Every row carries `archived_at`; it is the zero time `0001-01-01T00:00:00Z` when the session is not archived.
+
+A live `list --json` captures every live pane with one tmux call per socket. When that call times out (a host too loaded to answer it), the listing does not fall back to one `capture-pane` per session: those rows carry `"status_source": "stale"`: status is the last one observed in this process (the default for a fresh process), `substate` is the last one seen or absent, and `--stats` reports how many panes were skipped as `captures_skipped` (absent when none).
 
 Both JSON forms always include `account`: the exact stored per-session slot, including an empty string when no slot is explicitly stored. Human tables show the slot in a quoted `ACCOUNT` column, escaping controls. This is stored metadata, not a resolved account or login identity.
 
@@ -141,6 +146,7 @@ agent-deck status [-v|-q|--json]
 - Default: `2 waiting - 5 running - 3 idle`
 - `-v`: Detailed list by status
 - `-q`: Just waiting count (for scripts)
+- Archived sessions are not counted or listed: archiving stops the pane on purpose, so their stopped/error status is not news. `list --json` still includes them, each with `"archived": true`.
 
 ### migrate-paths - Copy legacy data into XDG layout
 
@@ -173,6 +179,35 @@ agent-deck update --timer-status [--json]
 - `--timer-status` kinds: `launchd`, `systemd`, `systemd-legacy` (a hand-made `agentdeck-autoupdate.timer`; `legacy_unit` names it, and it is also set next to a canonical timer when both exist), `none`; `--json` prints `{installed, kind, path, active, detail, legacy_unit, legacy_path, last_run, next_run, note}` (`last_run`/`next_run` from `systemctl --user show`, RFC 3339 UTC; `note` says e.g. "no systemd user session"). A controller shows `unknown` for a remote whose binary predates it. The timer's output goes to `<log dir>/auto-update.log` on macOS and the journal on Linux.
 - On macOS every install (interactive, `--version`, the TUI prompt and `--unattended`) re-registers the `com.agentdeck.*` launch agents whose program is the replaced binary (`launchctl bootout` then `bootstrap`, then a `state = running` check for KeepAlive/RunAtLoad agents). Without this they crash-loop with `EX_CONFIG` (exit 78) because macOS ties a launch agent's identity to the file at its program path. If an agent does not come back the command exits 1 and prints the two `launchctl` commands to run by hand; the binary is already updated at that point.
 - Every install attempt (interactive `update`, `--version`, the startup prompt and `--unattended` from the timer, the TUI, the web or notify daemon, or a nudge) appends one line to `auto-update.log` in the agent-deck log dir: `<time> install <from> -> <to> ok|failed: <reason> source=<manual|manual-version|startup-prompt|timer|tui|web|nudge|...> pid=<pid> ppid=<ppid>`, plus `service=<launchd service>` under launchd. The file is created 0600.
+- After a successful interactive install (`update`, or `--version` to a newer release) it prints the same block as `whats-new` for the old version up to the new one and marks the new version seen. `--unattended` (the update timer) fetches nothing extra: it prints one line saying What's new shows on the next start, and leaves the range unseen so the TUI shows its What's new dialog after the restart. A changelog that cannot be read is one note line and never fails the update.
+
+### whats-new - What changed since the version you last saw
+
+```bash
+agent-deck whats-new                   # your fixed reports first, then each version's highlights
+agent-deck whats-new --json            # {ok, from, to, fixed:[{number,title,url,fixed_in,feedback}], versions:[{version,date,highlights}], text, empty}
+agent-deck whats-new --since 1.16.36   # changes after a given version
+agent-deck whats-new --mark-seen       # remember the current version as seen
+```
+
+- A report counts as fixed in the oldest release newer than the version it was filed on, and not newer than the running one, whose `### Fixes` (or `### Fixed`) section cites `#N`. Each fixed report shows `Your report #N: fixed in vX` with the `feedback fixed` command to answer.
+- The first run on a machine remembers the current version and prints `Nothing new since vX.`
+- The changelog is the `CHANGELOG.md` on GitHub `main`; `AGENTDECK_CHANGELOG_URL` (an http(s) URL or a file path) overrides it.
+
+### feedback - Report a problem, track it, say whether the fix works
+
+```bash
+agent-deck feedback                    # rate agent-deck (Discussion #600, disclosure + y/N)
+agent-deck feedback bug|idea [flags]   # file an issue; full text shown, y/N (see --help)
+agent-deck feedback bug --from-agent --title T --what W [--expected E] [--steps S] [--tool X] [--json]
+agent-deck feedback mine [--json]      # reports filed from this machine and their state
+agent-deck feedback fixed N --fixed|--not-fixed [--comment C] [--dry-run] [--json] [--yes] [--from-agent] [--again]
+agent-deck feedback agent-consent [--off]   # a person lets agent sessions post (shows what, where, as whom; y/N)
+```
+
+- `--from-agent` is the path for agent sessions: it never prompts and never opens a browser. It needs `[feedback] agent_reports = true`, which a person sets with `agent-deck feedback agent-consent` (else `consent_required`; `--yes` does not stand in). It runs inside an agent-deck session (`AGENTDECK_INSTANCE_ID` set) or with `--yes`, needs `--title` and `--what`, and posts the scrubbed issue (home paths as `~`, tokens, emails and host names replaced) with version, OS and terminal but no log lines, marked AI-authored (model from `AGENTDECK_AGENT_MODEL`, else `unsure`), with the `found-by-agent` label and a "Found by an agent session" footer. If the repo lacks a label it files once more without labels. It first searches open issues carrying that footer; one with exactly the same title (same kind, after dropping the `[bug]`/`[feature]` prefix, case and punctuation) gets a "Seen again on vX" comment with the scrubbed what-happened (capped at 4000 characters) instead of a new issue. Without a logged-in `gh` it fails with `gh_failed`. `--json` prints `{ok, number, url, deduped, method}`.
+- Every issue filed through `gh` (agent or person) and every duplicate is recorded in `reports.json` in the agent-deck data dir (mode 0600), so `feedback mine` and `whats-new` know your reports.
+- `feedback fixed` posts `Fixed for me in vX.` or `Still broken for me in vX.`, your scrubbed comment and `(<os>/<arch>, via agent-deck feedback fixed)` as a public comment on issue #N with `gh issue comment`. People see where it posts, which GitHub account carries it and the exact text, then answer y/N (default N). `--json` needs `--yes` (else `confirm_required`); `--dry-run --json` prints `{ok, dry_run, number, body, account, gh_ready}`; `--from-agent` never prompts, needs `agent_reports` and `AGENTDECK_INSTANCE_ID` or `--yes`, and answers only an unanswered report an agent filed from this machine (else `invalid_input`). People may answer any number. The answer is recorded so What's new asks once; a second answer on the same report needs `--again`. Inside an agent session (`AGENTDECK_INSTANCE_ID` set), terminal or not, any real post from `feedback bug|idea|fixed` counts as an agent's: without `agent_reports` it is refused with `consent_required`, with it it takes the `--from-agent` path; `feedback agent-consent` refuses there too. People post from the TUI, the Mac app or a shell outside sessions.
 
 ## Shell Completion
 
@@ -245,6 +280,12 @@ When token auth is enabled, open the web UI with:
 ```bash
 http://127.0.0.1:8420/?token=my-secret
 ```
+
+That visit sets an HttpOnly, SameSite=Strict cookie that authenticates the API,
+event streams and terminal WebSocket for 30 days (renewed on each app launch),
+so reloads and a home-screen install keep working. Use a hex token (`openssl
+rand -hex 32`): a token with `"`, `,`, `;`, a backslash or non-ASCII gets no
+cookie.
 
 ## Session Commands
 
@@ -330,6 +371,7 @@ Auto-detects current session if no ID provided.
 - `opencode_session_id`: the native OpenCode conversation id, present for OpenCode sessions only (an empty string until one is known or set with `session set <id> opencode-session-id <ses_...>`)
 - Attached MCPs (local, global, project)
 - tmux session name
+- `archived` (always present, as in `list --json`) and `archived_at` (only when archived). `list --json` differs here: it always carries `archived_at`, set to the zero time `0001-01-01T00:00:00Z` for a session that is not archived, so read `archived` rather than the presence of `archived_at`. Archiving records `stopped`, including for a session whose pane was already gone, and like `session stop` it releases a 401 auth hold, so restarting the session after `session unarchive` does not need `--force`.
 - `substate` / `substate_detail` (omitted when none). Substate `background-work` (Claude) means the foreground turn ended but a Workflow, background agents, shells or a Monitor are still in flight: status is `running`, `substate_detail` reads e.g. `workflow comms-followon-round3 3/5 · 18m32s`, and a `background_work` object carries the structure:
 
 | Field | Meaning |
@@ -469,7 +511,7 @@ agent-deck session send <id|title> --message-file <file|-> [--wait|--stream|--no
 
 Use `--message-file` for long or multiline messages, or `--message-file -` for stdin. Do not combine it with an inline message.
 
-Send envelope: a send made from inside an agent-deck session (`AGENTDECK_INSTANCE_ID` set) to a Claude target starts with one line `[agent-deck from:<your session id>]`. The receiver's reply turn is then classified as a `send` (not a human prompt); when you are not the receiver's parent, the reply is also committed to YOUR inbox (also when the receiver has no parent: a peer, or your top-level conductor) as an urgent record with `target_kind:"reply"` (rendered `- [urgent] reply from=<child id> <title>: <status>` by the prompt-time drain and `inbox drain`/`peek`), and an idle sender is woken for it whatever its title. The reply does not wait on the receiver's parent: it lands even while the parent's inbox is full (a stopped parent), and a retried turn never duplicates it or wakes you twice. The receiver's parent keeps its own copy; when the parent itself asked, that copy is its reply, and an idle Claude parent is woken for it whatever its title. `--no-tag` or `[send] tag_sends = false` turns tagging off; a human shell (no env), a sender that is not a Claude-compatible session in the target's profile (shell, Codex, Gemini: it has no prompt-time drain for the reply), `--draft`, a bare slash command, a conductor heartbeat, a send to yourself, a non-Claude target and an already-enveloped message are never tagged. Every `--json` receipt (sync, queued, draft, skipped) carries `"tagged": true|false`; the envelope counts toward `line_too_long` and every other delivery guard. A receiver with `no_transition_notify` never reports its turns, so its identity block tells it to answer with an explicit `session send` instead.
+Send envelope: a send made from inside an agent-deck session (`AGENTDECK_INSTANCE_ID` set) to a Claude target starts with one line `[agent-deck from:<your session id>]`. The receiver's reply turn is then classified as a `send` (not a human prompt); when you are not the receiver's parent, the reply is also committed to YOUR inbox (also when the receiver has no parent: a peer, or your top-level conductor) as an urgent record with `target_kind:"reply"` (rendered `- [urgent] reply from=<child id> <title>: <status>` by the prompt-time drain and `inbox drain`/`peek`), and an idle sender is woken for it whatever its title. The reply does not wait on the receiver's parent: it lands even while the parent's inbox is full (a stopped parent), and a retried turn never duplicates it or wakes you twice. The receiver's parent keeps its own copy; when the parent itself asked, that copy is its reply, and an idle Claude parent is woken for it whatever its title (an urgent reply: a question back, a completion sentinel or an error; a plain answer is info). A `launch` kickoff from inside the parent carries the same envelope, so a child's first turn counts as that reply. A turn too long for the transcript tail window is attributed from the sender the hook recorded when the prompt was submitted. `--no-tag` or `[send] tag_sends = false` turns tagging off; a human shell (no env), a sender that is not a Claude-compatible session in the target's profile (shell, Codex, Gemini: it has no prompt-time drain for the reply), `--draft`, a bare slash command, a conductor heartbeat, a send to yourself, a non-Claude target and an already-enveloped message are never tagged. Every `--json` receipt (sync, queued, draft, skipped) carries `"tagged": true|false`; the envelope counts toward `line_too_long` and every other delivery guard. A receiver with `no_transition_notify` never reports its turns, so its identity block tells it to answer with an explicit `session send` instead.
 
 `--json` on its own (no `--wait`, `--stream`, `--no-wait`, `--draft` or `--defer-if-busy`) returns at once with the queued record (`send_id`, `state`, `verdict`) plus the sync keys `success`, `delivery:"queued"`, `submitted:false`, `confirmation:"unknown"`; `session send-status <send_id> --json` follows it to `delivered`/`unknown`. Claude accepts the message while busy; Codex, Pi, shell and unknown harnesses are typed when idle.
 
@@ -498,6 +540,7 @@ Delivery verdict (`--json` also carries `delivery` and a machine-checkable `subm
 - `delivered` (exit 0, `submitted: false`, `confirmation: "unknown"`) — the message body reached the target and Enter was sent, but the tool exposes no submission signal (a shell, an unknown tool) or its signal didn't arrive in the window; this is the honest "delivered-unconfirmed" outcome, not a failure.
 - `unverified` (exit 0, `confirmation: "unknown"`): the payload was small enough to rule out the overflow failure mode, but neither a Claude-shaped submission signal nor a content-arrival check reached a verdict — genuinely unknown, not "probably failed".
 - `line_too_long`, `menu_open`, `pane_gone`, `typed_not_submitted`, `no_evidence`, `send_failed`, `composer_blocked`, `socket_write_failed` (exit 1, `confirmation: "failed"`, `code: DELIVERY_FAILED`): not delivered on positive evidence (a gone pane, a composer still holding the body, an open menu) — see the error text for whether a retry is safe. (There is no `typed` verdict — that pre-#1793 catch-all was replaced by `delivered`/`unverified` above so the exit code follows the evidence instead of its absence.)
+- What a failed send left in the target's input box (`composer_residue`). agent-deck never removes or submits anything in another session's input box: no Backspace, no clearing, no automatic cleanup of its own leftovers; it only reports them. `none`: nothing was typed (only on a refusal before any keystroke: `composer_blocked`, or the `--require-input-prompt` guard refusing before typing). `left` (`typed_not_submitted`): the send typed and the input box now shows text, or could not be read (then unverified); the error says "this send's text is still typed, unsubmitted, in the target's input box; a person must submit or clear it", and `composer_residue_verified` says whether what is there was verified as only this send's text (unverified adds "it may be mixed with other text"; image placeholders such as `[Image #N]`, which Claude makes from file paths in a pasted body, are never verified). `absent`: the send typed (or may have) but the input box now reads empty, so something other than this send emptied it and the message may have been submitted; do not blindly resend (`typed_not_submitted`, or `send_failed` when the transport itself failed). Tools without a full-body input reader (Codex, Gemini, OpenCode, pi, shells) get no `composer_residue` after typing: unknown, never `none`. When a send leaves text (`left`), agent-deck records a hash of it per target (no text on disk, private files, kept up to 7 days). A later send refused with `composer_blocked` then says what the input box holds in `composer_holds`: `agent_deck_residue` (the box matches, by hash, the unsent message a failed agent-deck send left and verified as only its own; a person may have typed or recalled the same text since, so check before clearing; with `residue_sender` and `residue_age_seconds`), `agent_deck_residue_unverified` (the box matches what a failed send saw there, but that was never verified as agent-deck's: it may be partly or wholly a person's draft), `unknown_text` (agent-deck left a message there but the box has changed since), `other_text` (no leftover on record: a person's draft?) or `unreadable`. The record only makes the refusal informative; it never causes a key press, and it expires when a later send sees the input box empty.
 
 With `--wait` or `--stream` on a Claude target, the reply is bound to the transcript record of this exact message: a message queued behind a live turn waits for its own turn to start, the read begins after that record, and it stops at the next human prompt (an interrupted turn is reported as incomplete or as a stream error, not as the next turn's answer). Slash commands and non-Claude tools keep the timestamp-based best-effort reply.
 
@@ -786,6 +829,16 @@ agent-deck session switch-account "My Project" work
 
 Accounts are the profiles named in `config.toml` (`[profiles.<name>.claude].config_dir`).
 
+### switch - Show any session in the Mac app
+
+```bash
+agent-deck switch "api server"          # id, id prefix, title, part of a title, group words
+agent-deck switch "voice 0956" --json   # {status, query, session, via, candidates, elapsed_ms}
+agent-deck switch docs --no-attach --wait 5s
+```
+
+Resolves exact id, unique id prefix, exact title (any case), then a fuzzy title and group match; numbers must match exactly and archived sessions are left out. On the Mac it opens `agentdeck://focus?session=<id>`; elsewhere it publishes `macapp.switch` and waits `--wait` (default 2s) for `macapp.switch.ack`. With no app it attaches in the terminal, or with `--json`/`--no-attach` reports `queued`. Exit 2 = no match, exit 3 = ambiguous (up to five `candidates`). Not `session switch`, which changes a session's harness or account. Details: `docs/switch.md`.
+
 ### open - Show a page in the macOS app Browser panel
 
 ```bash
@@ -827,7 +880,7 @@ Needs two opt-ins, neither a security boundary: `agent-deck config set browser.e
 agent-deck file bundle /abs/report/index.html --session <id> > report.tar
 ```
 
-Streams an uncompressed tar of the folder (a file argument exports its parent folder, so relative assets keep their paths). Capped at 20 MiB including tar overhead; symlinks and special files are refused; nothing is written on the host and no partial archive is emitted on failure.
+Streams an uncompressed tar of the folder (a file argument exports its parent folder, so relative assets keep their paths). Capped at 20 MiB including tar overhead; when a file's folder is bigger, the page, the files it references and then the smallest other files that fit are exported, and an export that cannot fit names the biggest files; symlinks and special files are refused; nothing is written on the host and no partial archive is emitted on failure.
 
 ## Fleet Recovery Commands
 
@@ -1067,6 +1120,8 @@ agent-deck group list [--json] [-q]
 agent-deck group show <name> [--resolved] [--json]   # --resolved adds the effective claude config
 ```
 
+`group list` counts each group's sessions together with its subgroups'. Like `status`, it leaves archived sessions out of every count: the per-group session count and status counts and the total (`session_count`, `status` and `total_sessions` in `--json`). A group whose sessions are all archived is still listed, with a count of 0, as an empty group is.
+
 ### group create
 
 ```bash
@@ -1119,7 +1174,8 @@ agent-deck conductor list [--profile <name>]
 - Re-running `setup <name>` without `--agent` keeps the conductor's existing agent (new conductors default to `claude`); pass `--agent` explicitly to switch. On a switch, the previous agent's instructions file (`CLAUDE.md` / `AGENTS.md` / `HERMES.md`) is deleted only if it still matches the generated template; an edited file is renamed to `<file>.bak-<timestamp>`.
 - `setup` also installs shared `<conductor dir>/CLAUDE.md` (or symlink via `--shared-claude-md`).
 - Heartbeat timers run per conductor (default every 15 minutes) and can be disabled with `--no-heartbeat`.
-- Heartbeat sends use non-blocking `session send --no-wait -q` to avoid timeout churn when sessions are busy.
+- Heartbeat sends use non-blocking `session send --json --no-wait` to avoid timeout churn when sessions are busy. A send the idle gate skipped or a muted trigger dropped (`"skipped": true` / `"muted": true`) is not saved as delivered, so the same tick is offered again next time.
+- `heartbeat.sh` takes `<conductor dir>/<name>/heartbeat.lock` with `flock -n` (a second run exits 0; without `flock`, as on macOS, it runs unlocked). When the conductor is `error`, `stopped` or missing it appends `heartbeat: conductor <name> is <status>; heartbeat not sent` to `heartbeat.log` and queues one `conductor notify --tier urgent` item, once per outage (cleared when it is `idle` or `waiting` again).
 - Bridge daemon is installed only when Telegram and/or Slack is configured in `[conductor]`.
 - Transition notifier daemon (`agent-deck notify-daemon`) is installed by setup and sends event nudges on `running -> waiting|error|idle` transitions (parent first, then conductor fallback).
 
@@ -1158,7 +1214,7 @@ agent-deck inbox stats [--json] --all
 agent-deck inbox stats --reset <session-id>
 ```
 
-Read-only counters (#2469) kept per parent under `runtime/inbox-stats/`: records by tier (`records_urgent`, `records_info`, `records_legacy`), turns suppressed (`noise_suppressed`, `dedup_suppressed`), wakeups (`wakeups_urgent`, `wakeups_digest`, `wakeups_suppressed`), delivery (`drains`, `records_delivered`, `bytes_injected`, `text_bytes`), notices withdrawn because the parent already read the child's result with `session output` (`wakeups_withdrawn`, `records_withdrawn`) and `last_urgent_latency_ms`. The text form adds the signal ratio (recorded turns over observed turns). Nothing is consumed.
+Read-only counters (#2469) kept per parent under `runtime/inbox-stats/`: records by tier (`records_urgent`, `records_info`, `records_legacy`), turns suppressed (`noise_suppressed`, `dedup_suppressed`), wakeups (`wakeups_urgent` counts wake sends dispatched; a dispatched send that then refuses in the parent's pane, because of typed text in its input box or an open menu, still counts, and is logged as `wake_nudge_dispatch_failed`; `wakeups_digest`, `wakeups_suppressed`, and `wakeups_gated` for records that could wake but dispatched nothing because the parent is not a wake target, was busy or was debounced; a record that is not a reply wakes only a conductor, or any idle Claude parent with `[inbox] wake_parents = true`), delivery (`drains`, `records_delivered`, `bytes_injected`, `text_bytes`), notices withdrawn because the parent already read the child's result with `session output` (`wakeups_withdrawn`, `records_withdrawn`) and `last_urgent_latency_ms`. The text form adds the signal ratio (recorded turns over observed turns). Nothing is consumed.
 
 Every record drained with `inbox drain` now carries `tier`, `trigger`, `text` (the child's new text, capped), `text_hash`, `turn_uuid`, `question` and `seq`; the text form prints the text indented under the record line.
 
@@ -1249,9 +1305,9 @@ Lists all configured remotes. The VERSION column shows the agent-deck version ea
 agent-deck remote sessions [name] [--json] [--with-errors|--json-envelope]
 ```
 
-Fetches active sessions from all remotes, or from a specific remote if `name` is provided. Displays title, tool, live status, and session ID. Use `--json` for scripting: it emits a bare array of sessions, so consumers piping through `jq '.[]'` keep working. Per-remote fetch failures are printed in text mode but are not visible in the bare-array JSON.
+Fetches active sessions from all remotes, or from a specific remote if `name` is provided. Displays title, tool, live status, and session ID. Use `--json` for scripting: it emits a bare array of sessions, so consumers piping through `jq '.[]'` keep working. If any remote cannot be reached the command exits `1` in every mode: text mode prints the error, and bare `--json` writes `[name] Error: ...` to stderr while stdout stays a bare array of the sessions from the reachable remotes.
 
-To also see fetch failures in JSON, add `--with-errors` (or the equivalent `--json-envelope`, which implies `--json`): the output becomes `{"sessions": [...], "errors": [{"name", "host", "error"}]}` and the command exits `1` if any remote failed. This envelope is always opt-in, so the plain `--json` shape stays stable for existing scripts.
+To also get the failures in the JSON output, add `--with-errors` (or the equivalent `--json-envelope`, which implies `--json`): the output becomes `{"sessions": [...], "errors": [{"name", "host", "error"}]}`, and the exit code is `1` if any remote failed, as in the other modes. This envelope is always opt-in, so the plain `--json` shape stays stable for existing scripts.
 
 In the TUI, remote sessions use the same status indicators and nested group tree as local sessions. A remote session whose `parent_session_id` (included in `--json` when set) names another session in the same remote group, such as a conductor's child, is shown one level under that parent; when the parent is not listed there it is shown flat. Each `--json` row also carries `favorite: true` when the session is a favourite on the remote (the key is absent otherwise, and from remotes too old to report it), so a remote favourite needs no separate `remote <name> list --json` call. Remote headers and groups can be collapsed, and `K`/`J` preserve a manual order within each remote group, moving a conductor's child only among its siblings. A session's location (local or SSH host plus remote path) is part of its identity, so identical titles at different locations do not collide.
 
@@ -1261,7 +1317,7 @@ In the TUI, remote sessions use the same status indicators and nested group tree
 agent-deck remote <name> recall timeline <session> --json [--tail N | --since <cursor> | --before <before_cursor> --limit N]
 agent-deck remote <name> recall follow <session> --after <cursor|end> --jsonl [--status]
 agent-deck remote <name> events follow --jsonl [--since <cursor>] [--kind <prefix,...>] [--session <id>] [--profile <name>]
-agent-deck remote <name> events publish --kind macapp.open.ack|macapp.browser.response|macapp.app.focus|macapp.ask.seen --session <id> --data-file - < reply.json
+agent-deck remote <name> events publish --kind macapp.open.ack|macapp.switch.ack|macapp.browser.response|macapp.app.focus|macapp.ask.seen --session <id> --data-file - < reply.json
 agent-deck remote <name> session send-status <send-id> --json
 ```
 

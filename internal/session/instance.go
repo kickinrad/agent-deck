@@ -448,7 +448,7 @@ type Instance struct {
 
 	// Channels are Claude Code plugin-channel ids (e.g. "plugin:telegram@user/repo").
 	// When non-empty on a claude session, buildClaudeExtraFlags emits
-	// `--channels <csv>` so the session subscribes to inbound plugin messages.
+	// one `--channels <entry>` per channel so the session subscribes to inbound plugin messages.
 	// Without this flag the channel plugin runs as a plain MCP (tools only,
 	// no inbound delivery) which silently drops Telegram/Discord/Slack
 	// messages on conductor restart.
@@ -482,6 +482,25 @@ type Instance struct {
 	// the tool_data extras zone so a restart honours the choice. CLI flag:
 	// `--no-identity` on `agent-deck add` / `agent-deck launch`.
 	IdentityInjectionDisabled bool `json:"identity_injection_disabled,omitempty"`
+
+	// PiSocketExported records that the last launch of this pi exported
+	// a socket path in AGENTDECK_PI_SOCKET: a v5 or later extension serves the socket, so the daemon never
+	// types a doorbell into it (a connect failure is a rebind or reload window,
+	// not an absent pi). Persisted in the tool_data extras zone with the tmux
+	// session it was recorded for (pi_socket_persist.go), and read back only
+	// while the row still names that session; a pi with no record is treated as
+	// launched without it.
+	PiSocketExported bool `json:"pi_socket_exported,omitempty"`
+
+	// LaunchedTool is the tool the last launch of this session ran: what its
+	// pane runs now. A tool edit changes Tool at once but takes effect only at
+	// the next restart, so the comms ledger reads the parent's harness from
+	// here (commsParentTool). Written by the launch's targeted write (start and
+	// every restart), and by a full save only for a launch that found no row to
+	// write to (launchUnrecorded), so a stale save cannot revert it; empty for a
+	// session no launch of this version recorded, or whose recorded launch was
+	// for another tmux session (see PiSocketExported).
+	LaunchedTool string `json:"launched_tool,omitempty"`
 
 	// ContextLevel is the per-session override of the harness context-level
 	// (issue #2260): "none", "primer", or "full". Empty means unset — falls
@@ -650,10 +669,14 @@ type Instance struct {
 	// from by following a continued-in handoff (#2683). A late hook still
 	// carrying one must not revert ClaudeSessionID to the stalled copy.
 	claudeSupersededIDs         map[string]struct{}
-	hookLastUpdate              time.Time // When hook status was last received
-	linkedClaudeSessionID       string    // Last Claude id confirmClaudeSessionLink wrote a session_links row for
-	skipRecoveryTurn            bool      // SkipConductorRecoveryTurn: the next spawn sends no recovery turn
-	restartReason               string    // SetRestartReason: why the next restart happens, for its resume note
+	hookLastUpdate              time.Time   // When hook status was last received
+	acknowledgedAt              time.Time   // When the user last marked this session seen (from SQLite on load)
+	linkedClaudeSessionID       string      // Last Claude id confirmClaudeSessionLink wrote a session_links row for
+	skipRecoveryTurn            bool        // SkipConductorRecoveryTurn: the next spawn sends no recovery turn
+	restartReason               string      // SetRestartReason: why the next restart happens, for its resume note
+	launchesFresh               atomic.Bool // the Claude command last built starts a new conversation (#2954, fresh_start.go)
+	launchUnrecorded            atomic.Bool // the last launch found no row for its launched tool: the first save writes it
+	configDirLeftToCommand      bool        // the export prefix last built left CLAUDE_CONFIG_DIR to the command (#1822 F3; noteFreshStart)
 	codexStartedGeneration      string
 	codexCompletedGeneration    string
 	codexStartedSessionID       string
@@ -680,6 +703,7 @@ type Instance struct {
 	restartTmuxRecordMu     sync.Mutex
 	restartTmuxRecordErr    error
 	restartTmuxRecordStamps statedb.WriteStamps
+	launchRecordStamps      statedb.WriteStamps // the last launch write's, for LaunchRecordStamps
 
 	// SSE-based status detection for OpenCode (set by OpenCodeSSEWatcher,
 	// issue #1614). Not persisted; rebuilt from the live event stream.
@@ -951,19 +975,44 @@ func resolveRealPath(p string) string {
 	return p
 }
 
+// reservedMultiRepoNames maps entry names agent-deck itself creates in a
+// multi-repo parent dir to the link name a repo with that basename gets
+// instead. Without this a repo such as ~/.claude became the link
+// <parent>/.claude and the generated CLAUDE.md was written through it (#3041).
+var reservedMultiRepoNames = map[string]string{
+	".claude":   "dot-claude",
+	"CLAUDE.md": "dot-CLAUDE.md",
+}
+
 // DeduplicateDirnames returns unique directory names for the given paths.
 // When multiple paths share the same basename, a numeric suffix is appended (e.g., "src-1").
+// Basenames reserved for agent-deck's own files in the parent dir (".claude")
+// are renamed first (".claude" becomes "dot-claude").
 func DeduplicateDirnames(paths []string) []string {
 	seen := make(map[string]int)
+	used := make(map[string]bool)
 	result := make([]string, len(paths))
 	for i, p := range paths {
 		dirname := filepath.Base(p)
-		if n := seen[dirname]; n > 0 {
-			result[i] = fmt.Sprintf("%s-%d", dirname, n)
-		} else {
-			result[i] = dirname
+		// Case-insensitive: on macOS ".Claude" is the same entry as ".claude".
+		for reserved, renamed := range reservedMultiRepoNames {
+			if strings.EqualFold(dirname, reserved) {
+				dirname = renamed
+				break
+			}
 		}
-		seen[dirname]++
+		n := seen[dirname]
+		candidate := dirname
+		if n > 0 {
+			candidate = fmt.Sprintf("%s-%d", dirname, n)
+		}
+		for used[candidate] {
+			n++
+			candidate = fmt.Sprintf("%s-%d", dirname, n)
+		}
+		used[candidate] = true
+		seen[dirname] = n + 1
+		result[i] = candidate
 	}
 	return result
 }
@@ -1182,15 +1231,26 @@ func (inst *Instance) SetToolThreadSafe(t string) {
 // the attach path (see attachSession's no-synchronous-save note); one
 // UPDATE is not.
 func (inst *Instance) MarkAccessed() {
-	inst.LastAccessedAt = time.Now()
+	now := time.Now()
+	inst.mu.Lock()
+	inst.LastAccessedAt = now
+	inst.mu.Unlock()
 	if err := inst.withOwningStateDB(func(db *statedb.StateDB) error {
-		return db.WriteLastAccessed(inst.ID, inst.LastAccessedAt)
+		return db.WriteLastAccessed(inst.ID, now)
 	}); err != nil && !errors.Is(err, errNoStateDB) {
 		sessionLog.Debug("last_accessed_persist_failed",
 			slog.String("instance", inst.ID),
 			slog.String("error", err.Error()),
 		)
 	}
+}
+
+// GetLastAccessedAtThreadSafe returns LastAccessedAt under the read lock, for
+// readers off the UI goroutine such as the notification bar sync (#2949).
+func (inst *Instance) GetLastAccessedAtThreadSafe() time.Time {
+	inst.mu.RLock()
+	defer inst.mu.RUnlock()
+	return inst.LastAccessedAt
 }
 
 // GetLastActivityTime returns when the session was last active (content changed)
@@ -1231,8 +1291,8 @@ func (inst *Instance) DisplayLastActivityTime() time.Time {
 	if ok {
 		return ts
 	}
-	if !inst.LastAccessedAt.IsZero() {
-		return inst.LastAccessedAt
+	if la := inst.GetLastAccessedAtThreadSafe(); !la.IsZero() {
+		return la
 	}
 	return inst.CreatedAt
 }
@@ -1356,6 +1416,7 @@ func (i *Instance) applyLaunchSettingsFromConfig() {
 	// local directory nothing reads. Every local session keeps the guards.
 	i.tmuxSession.WorkDirIsPlaceholder = i.IsSSH()
 	i.applyVimModeFromConfig()
+	i.applyStartupTimeoutHint()
 }
 
 // applyVimModeFromConfig copies [claude].vim_mode onto the tmux session so the
@@ -1372,6 +1433,43 @@ func (i *Instance) applyVimModeFromConfig() {
 		return
 	}
 	i.tmuxSession.VimMode = cfg.Claude.GetVimMode()
+}
+
+// framePasteForTool reports whether a tool's input composer must receive the
+// message body as ONE framed (bracketed) paste even when it is a short
+// single-line message that the unframed `send-keys -l` transport could type
+// directly.
+//
+// Codex re-processes a typed burst character by character. While that
+// ingestion is still running its paste-burst detector treats an arriving Enter
+// as a newline inside the paste rather than a submit, and re-arms its 120ms
+// suppression window from that Enter — so the fixed pre-Enter delay left the
+// message sitting in the composer, unsent, and the Codex send path (which has
+// no automatic Enter retry) reported typed_not_submitted. Measured on
+// codex-cli 0.159.3 under tmux 3.4: a 513-byte single-line body sent with
+// `send-keys -l` was never submitted with Enter at 100ms or 200ms and
+// submitted at 500ms, while the identical body sent as a framed paste
+// submitted with Enter at 50ms. The frame gives the composer one paste event
+// to ingest, so the ordinary delay is enough.
+//
+// Every other tool returns false and keeps its transport unchanged.
+func framePasteForTool(tool string) bool {
+	return IsCodexCompatible(tool)
+}
+
+// preEnterDelayForTool returns the pause a tool's input composer needs between
+// the delivered message body and the submitting Enter, beyond the transport
+// default. Devin CLI's editor coalesces bytes arriving within ~100–150ms into
+// a single input burst and inserts a trailing Enter as a newline instead of
+// submitting — measured on Devin CLI 3000.10.27 under tmux 3.7b, where the
+// transport default of 100ms reliably newline'd and 150ms submitted. 300ms
+// clears the measured window with margin; every other tool returns 0 and
+// keeps the historical default.
+func preEnterDelayForTool(tool string) time.Duration {
+	if IsDevinCompatible(tool) {
+		return 300 * time.Millisecond
+	}
+	return 0
 }
 
 // NewInstanceWithGroup creates a new session instance with explicit group
@@ -1713,12 +1811,15 @@ func (i *Instance) Start() (startErr error) {
 	}
 	i.retireFastDeathWatchers() // #2805
 	i.setInteractiveShellLaunchEnv()
+	noteFreshStart(i, time.Now()) // #2954: before the spawn, so the daemon judges its boot
 	if err := i.tmuxSession.Start(command); err != nil {
+		clearFreshStartToken(i.ID)
 		// #1580: persist the tmux-level failure so the preview / session show /
 		// lifecycle log can surface it instead of a bare "error".
 		i.recordTmuxStartFailure(command, err)
 		return fmt.Errorf("failed to start tmux session: %w", err)
 	}
+	i.persistLaunchDecision() // the pane spawned: the launch decision is now a fact
 
 	// gen AND the wake channel are both produced here, in the caller, so no
 	// bump can slip into the gap before the watcher subscribes (see
@@ -2115,11 +2216,14 @@ func (i *Instance) StartWithMessage(message string) (startErr error) {
 	}
 	i.retireFastDeathWatchers() // #2805
 	i.setInteractiveShellLaunchEnv()
+	noteFreshStart(i, time.Now()) // #2954, sister path to Start()
 	if err := i.tmuxSession.Start(command); err != nil {
+		clearFreshStartToken(i.ID)
 		// #1580: persist the tmux-level failure (sister path to Start()).
 		i.recordTmuxStartFailure(diagnosticCommand, err)
 		return fmt.Errorf("failed to start tmux session: %w", err)
 	}
+	i.persistLaunchDecision() // before any message wait (sister path to Start())
 
 	// One generation for this spawn, shared by the ownership claim and the
 	// fast-death watcher (sister path to Start()).
@@ -2399,7 +2503,13 @@ func (i *Instance) updateStatus(pass *StatusUpdatePass, syncMetadata bool) error
 			// Reset stale acknowledged flag from ReconnectSessionLazy.
 			// Without this, sessions loaded from SQLite with previousStatus="idle"
 			// would report idle even when the hook file says waiting/running.
-			if i.tmuxSession != nil && (hs.Status == "running" || hs.Status == "waiting") {
+			// A "waiting" event older than the user's last visit is the turn
+			// they already saw: keep the visit, or every reload undoes it. A
+			// permission prompt or notification still needs an answer, so it
+			// always resets, as UpdateHookStatus treats it.
+			needsAnswer := hs.Event == "PermissionRequest" || hs.Event == "Notification"
+			if i.tmuxSession != nil && (hs.Status == "running" ||
+				(hs.Status == "waiting" && (needsAnswer || !HookPredatesVisit(hs.UpdatedAt, hs.ReceivedAt, i.acknowledgedAt)))) {
 				i.tmuxSession.ResetAcknowledged()
 			}
 		}
@@ -2429,7 +2539,8 @@ func (i *Instance) updateStatus(pass *StatusUpdatePass, syncMetadata bool) error
 	// When this path is stale/missing, control naturally falls through to tmux
 	// polling and tool-specific session sync (tmux env/process-files/disk).
 	if HookStatusTool(i.Tool) && i.hookStatus != "" &&
-		time.Since(i.hookLastUpdate) < hookFastPathFreshnessForTool(i.Tool, i.hookStatus) {
+		(time.Since(i.hookLastUpdate) < hookFastPathFreshnessForTool(i.Tool, i.hookStatus) ||
+			i.hookHeldByTerminalEventLocked()) {
 		i.hookLagFlipped = false
 		i.bgWorkActive = false
 		i.bgWork = tmux.BackgroundWork{}
@@ -2484,11 +2595,19 @@ func (i *Instance) updateStatus(pass *StatusUpdatePass, syncMetadata bool) error
 			if IsCodexCompatible(i.Tool) {
 				// Codex completion should surface as attention-needed.
 				// Keep this as waiting and let tmux settle to idle if the user
-				// has acknowledged and no new activity appears.
-				if i.tmuxSession != nil {
-					i.tmuxSession.ResetAcknowledged()
+				// has acknowledged and no new activity appears. A completion
+				// older than the user's last visit was already seen, unless
+				// it was marked unread since (another TUI, the CLI or web
+				// clears the mark without this instance's visit time).
+				if i.tmuxSession != nil && i.tmuxSession.IsAcknowledged() &&
+					HookPredatesVisit(i.hookLastUpdate, time.Time{}, i.acknowledgedAt) {
+					i.Status = StatusIdle
+				} else {
+					if i.tmuxSession != nil {
+						i.tmuxSession.ResetAcknowledged()
+					}
+					i.Status = StatusWaiting
 				}
-				i.Status = StatusWaiting
 			} else {
 				// Claude fires its Stop hook (→ "waiting") when the FOREGROUND turn
 				// ends, including the turn that launched a Workflow, background
@@ -3203,4 +3322,30 @@ func (i *Instance) CaptureLoadedMCPs() {
 	}
 
 	i.LoadedMCPNames = mcpInfo.AllNames()
+}
+
+// HookPredatesVisit reports whether a hook event happened before the user's
+// last visit. The hook "ts" is whole seconds, so without the handler's
+// received time a Stop in the visit's own second counts as newer: a seen turn
+// shown as new beats a new turn shown as seen.
+func HookPredatesVisit(updated, received, visit time.Time) bool {
+	if !received.IsZero() {
+		return received.Before(visit)
+	}
+	return updated.Before(visit.Truncate(time.Second))
+}
+
+// AcknowledgedAt returns when the user last marked this session seen, as
+// loaded from storage, or zero when unknown.
+func (i *Instance) AcknowledgedAt() time.Time {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.acknowledgedAt
+}
+
+// ClearAcknowledgedAt drops the visit time once the session is marked unread.
+func (i *Instance) ClearAcknowledgedAt() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.acknowledgedAt = time.Time{}
 }

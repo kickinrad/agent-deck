@@ -78,6 +78,29 @@ func SetCheckIntervalDuration(d time.Duration) {
 	}
 }
 
+// cacheFreshMarginMax caps the margin cacheFreshFor takes off the interval.
+const cacheFreshMarginMax = 10 * time.Second
+
+// cacheFreshFor is how long a saved check answers CheckForUpdate without a
+// poll: the check interval less a small margin (10%, at most 10s).
+//
+// A headless poller (notify-daemon, `web --no-tui`) ticks every check
+// interval, and the cache it saved on the previous tick is stamped after
+// that tick's network round trip. Compared against the full interval, the
+// next tick finds the cache younger than the interval by that lag, serves
+// it, and only every second tick reaches GitHub: a new release was noticed
+// up to twice check_interval (default 90s, so 3 min) after publishing. The
+// margin absorbs the lag so every tick polls, as check_interval documents.
+// Polls stay conditional (If-None-Match with the cached ETag), and a cache
+// another process saved moments ago is still shared.
+func cacheFreshFor(interval time.Duration) time.Duration {
+	margin := interval / 10
+	if margin > cacheFreshMarginMax {
+		margin = cacheFreshMarginMax
+	}
+	return interval - margin
+}
+
 // SetBridgeScriptInstaller configures the bridge.py installer used after updates.
 func SetBridgeScriptInstaller(installer func() error) {
 	bridgeScriptInstaller = installer
@@ -652,7 +675,7 @@ func CheckForUpdate(currentVersion string, forceCheck bool) (*UpdateInfo, error)
 
 	// Try to use cache first (unless force check). A cache written by another
 	// version (the user upgraded) is polled again so ReleasesBehind is recounted.
-	if !forceCheck && haveCache && time.Since(cache.CheckedAt) < checkInterval && cacheWrittenBy(cache, currentVersion) {
+	if !forceCheck && haveCache && time.Since(cache.CheckedAt) < cacheFreshFor(checkInterval) && cacheWrittenBy(cache, currentVersion) {
 		applyCacheToInfo(info, cache, currentVersion)
 		return info, nil
 	}
@@ -898,11 +921,28 @@ type ChangelogEntry struct {
 	Content string
 }
 
-// FetchChangelog fetches the CHANGELOG.md from GitHub
+// ChangelogEnv overrides where the changelog is read from: an http(s) URL
+// or a local file path. Unset means the CHANGELOG.md on GitHub main.
+const ChangelogEnv = "AGENTDECK_CHANGELOG_URL"
+
+// FetchChangelog fetches the CHANGELOG.md from GitHub, or from the URL or
+// file ChangelogEnv names.
 func FetchChangelog() (string, error) {
 	url := fmt.Sprintf("https://raw.githubusercontent.com/%s/main/CHANGELOG.md", GitHubRepo)
+	if src := strings.TrimSpace(os.Getenv(ChangelogEnv)); src != "" {
+		if !strings.HasPrefix(src, "http://") && !strings.HasPrefix(src, "https://") {
+			data, err := os.ReadFile(strings.TrimPrefix(src, "file://")) // #nosec G304 -- operator-set override
+			if err != nil {
+				return "", fmt.Errorf("failed to read changelog: %w", err)
+			}
+			return string(data), nil
+		}
+		url = src
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
+	// #nosec G704 -- url is the fixed GitHub CHANGELOG URL, or the
+	// AGENTDECK_CHANGELOG_URL the operator set (tests, the sandbox simulation).
 	resp, err := client.Get(url)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch changelog: %w", err)

@@ -312,7 +312,12 @@ func (h *Home) adoptRestartRecord(sessionID string) {
 	if inst == nil {
 		return
 	}
-	h.adoptOwnWrite(inst.RestartRecordStamps(), "restart_record")
+	// The launch write is the restart's last own write on every path: the
+	// recreate path's outcome write, or a respawn-pane or fresh restart's launch
+	// decision write. A restart from the archived view also unarchives first,
+	// a second own write this does not account for, so its save still aborts
+	// and reloads, as it did before the launch write was stamped.
+	h.adoptOwnWrite(inst.LaunchRecordStamps(), "restart_record")
 }
 
 // adoptOwnWrite advances this TUI's freshness marker past a targeted write it
@@ -547,11 +552,22 @@ func (h *Home) applyUIState(state uiState) {
 
 // importSessions imports existing tmux sessions
 func (h *Home) importSessions() tea.Msg {
+	msg, _ := h.importSessionsCounted()
+	return msg
+}
+
+// importSessionsCounted is importSessions that also says how many sessions
+// it imported (the welcome screen says so when there were none).
+func (h *Home) importSessionsCounted() (tea.Msg, int) {
 	discovered, err := session.DiscoverExistingTmuxSessions(h.instances)
 	if err != nil {
-		return loadSessionsMsg{err: err}
+		return loadSessionsMsg{err: err}, 0
 	}
+	return h.addImportedSessions(discovered)
+}
 
+// addImportedSessions adds discovered sessions to this profile and saves.
+func (h *Home) addImportedSessions(discovered []*session.Instance) (tea.Msg, int) {
 	h.instancesMu.Lock()
 	h.instances = append(h.instances, discovered...)
 	h.instancesMu.Unlock()
@@ -562,5 +578,5 @@ func (h *Home) importSessions() tea.Msg {
 	}
 	// Save both instances AND groups (critical fix: was losing groups!)
 	h.saveInstances()
-	return importReloadMsg{}
+	return importReloadMsg{}, len(discovered)
 }

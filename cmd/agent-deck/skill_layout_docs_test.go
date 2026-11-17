@@ -150,12 +150,10 @@ func TestAgentDeckSkillEvalsCoverEveryArea(t *testing.T) {
 var removedSkillPath = regexp.MustCompile(`skills/(fleet|session-share|deck-retro|deck-repro)\b|\.\./(fleet|session-share|deck-retro|deck-repro)/|recall/SKILL\.md|\.github/skills/agent-deck-contributor`)
 
 // removedSkillPathAllowed lists files that may still name a removed path:
-// history, and the eval-smoke path filter, which needs a workflow-scope edit
-// (pending owner review) before it can follow the move.
+// history, and this test's own pattern.
 var removedSkillPathAllowed = map[string]string{
 	"CHANGELOG.md": "",
 	"cmd/agent-deck/skill_layout_docs_test.go": "",
-	".github/workflows/eval-smoke.yml":         "      - '.github/skills/agent-deck-contributor/scripts/self-check.sh'",
 }
 
 // No file in the repo may point at a skill path that was folded away, so a
@@ -220,6 +218,47 @@ func TestAgentDeckSkillEvalsDeterministic(t *testing.T) {
 		cancel()
 		if err != nil {
 			t.Errorf("check.py %s failed: %v\n%s", mode, err, out)
+		}
+	}
+}
+
+// The watcher-creator skill's deterministic evals (ASK-175): the same checker as the
+// agent-deck skill, pointed at the embedded skill and its evals under
+// tests/skill-evals/watcher-creator. The evals live outside the skill directory
+// because go:embed assets/skills/watcher-creator/* would ship them to the skill pool.
+func TestWatcherCreatorSkillEvalsDeterministic(t *testing.T) {
+	t.Parallel()
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not on PATH; run skills/agent-deck/evals/check.py by hand")
+	}
+	check := filepath.Join("..", "..", "skills", "agent-deck", "evals", "check.py")
+	args := []string{
+		"--skill-dir", filepath.Join("assets", "skills", "watcher-creator"),
+		"--evals-dir", filepath.Join("..", "..", "tests", "skill-evals", "watcher-creator"),
+	}
+	for _, mode := range []string{"static", "mutate"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		out, err := exec.CommandContext(ctx, python, append([]string{"-I", check, mode}, args...)...).CombinedOutput()
+		cancel()
+		if err != nil {
+			t.Errorf("check.py %s (watcher-creator) failed: %v\n%s", mode, err, out)
+		}
+	}
+}
+
+// Only the skill's own files are embedded and installed: an evals/ or tests/
+// directory inside assets/skills/watcher-creator would be flattened into the
+// user's skill pool by install-skill.
+func TestWatcherCreatorSkillAssetsHoldOnlySkillFiles(t *testing.T) {
+	t.Parallel()
+	entries, err := os.ReadDir(filepath.Join("assets", "skills", "watcher-creator"))
+	if err != nil {
+		t.Fatalf("read watcher-creator assets: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			t.Errorf("assets/skills/watcher-creator/%s would be installed into the skill pool; keep evals in tests/skill-evals/watcher-creator", e.Name())
 		}
 	}
 }

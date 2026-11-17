@@ -877,7 +877,6 @@ func (n *TransitionNotifier) wakeCommittedInbox(parent *Instance, event Transiti
 	if event.WakeSubmission != "" {
 		return // this turn's wake was already submitted
 	}
-	_ = BumpInboxStats(parentID, func(s *InboxStats) { s.WakeupsUrgent++ })
 	// Issue #1225 Tier-2: now that the record durably landed, wake an IDLE parent
 	// to drain it immediately instead of on its next ~14-min heartbeat. This is
 	// the event-driven trigger — fired the moment the completion is committed,
@@ -885,9 +884,22 @@ func (n *TransitionNotifier) wakeCommittedInbox(parent *Instance, event Transiti
 	// because this same record is still drained on the parent's next turn, and
 	// the daemon retries a busy parent once it is idle
 	// (reconcilePendingInboxWakes).
-	n.fireReservedWakeNudge(parent, event, func(ev TransitionNotificationEvent) bool {
+	//
+	// Issue #3131: count the wake only when a wake send was dispatched. A
+	// record the gate withholds (not a wake target, busy, debounced, the
+	// dispatch failed) is counted as gated. A dispatched send runs detached
+	// and can still refuse in the parent's pane (typed text in the input box,
+	// an open menu); that refusal is logged, not counted here.
+	if n.fireReservedWakeNudge(parent, event, func(ev TransitionNotificationEvent) bool {
 		return ev.Profile == event.Profile && cfg.WakesFor(ev.Tier)
-	})
+	}) {
+		_ = BumpInboxStats(parentID, func(s *InboxStats) { s.WakeupsUrgent++ })
+		return
+	}
+	_ = BumpInboxStats(parentID, func(s *InboxStats) { s.WakeupsGated++ })
+	commsLog.Debug("wake_nudge_gated",
+		slog.String("parent", parentID), slog.String("target_kind", event.TargetKind),
+		slog.Bool("wake_target", isWakeTarget(parent, event.TargetKind)), slog.String("turn", event.TurnFingerprint))
 }
 
 // pendingSameRecord reports whether the parent's inbox already holds this

@@ -673,7 +673,7 @@
    "area": "core",
    "file": "references/conductors.md",
    "heading": "Watchers",
-   "anchor": "`--secret` | GitHub repo webhooks with HMAC verification",
+   "anchor": "`--secret-file <chmod-600 file>` (an inline `--secret` is refused) | GitHub repo webhooks with HMAC verification",
    "summary": "Watcher adapter types and required flags; create/start/list/test.",
    "kind": "reference",
    "checked_by": [
@@ -2515,7 +2515,7 @@
    "area": "core",
    "file": "references/cli-reference.md",
    "heading": "Conductor Commands",
-   "anchor": "Heartbeat sends use non-blocking `session send --no-wait -q`",
+   "anchor": "Heartbeat sends use non-blocking `session send --json --no-wait`",
    "summary": "conductor setup/teardown/status/list; heartbeat per conductor; notify-daemon transition nudges.",
    "kind": "reference",
    "checked_by": [

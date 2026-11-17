@@ -289,6 +289,9 @@ type StatusRow struct {
 	Status       string
 	Tool         string
 	Acknowledged bool
+	// AcknowledgedAt is when the user last marked the session seen (zero when
+	// not acknowledged).
+	AcknowledgedAt time.Time
 	// HookLag is the persisted tool_data.hook_lag extra (nil when absent):
 	// the completed-turn samples a CLI pass recorded for a Claude session
 	// whose hook still says running (session/hook_lag.go).
@@ -390,12 +393,23 @@ func OpenReadOnlyLive(dbPath string) (*StateDB, error) {
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil, err
 	}
-	// Without a WAL, the main file is complete. Immutable mode can read it
-	// even when the directory cannot create SQLite's WAL/SHM sidecars.
-	if _, err := os.Stat(dbPath + "-wal"); os.IsNotExist(err) {
+	live, err := openReadOnlyDatabase(dbPath, false)
+	if err == nil {
+		// A live reader may still fail on its first read when the directory
+		// cannot hold SQLite's WAL/SHM sidecars; probe before handing it out.
+		var n int
+		if err = live.db.QueryRow(`SELECT COUNT(1) FROM sqlite_master`).Scan(&n); err == nil {
+			return live, nil
+		}
+		_ = live.db.Close()
+	}
+	// Without a WAL, the main file is complete, so immutable mode reads it
+	// even where the sidecars cannot be created. Only as a fallback: an
+	// immutable handle never sees later writes, and callers may cache it.
+	if _, statErr := os.Stat(dbPath + "-wal"); os.IsNotExist(statErr) {
 		return openReadOnlyDatabase(dbPath, true)
 	}
-	return openReadOnlyDatabase(dbPath, false)
+	return nil, fmt.Errorf("statedb: open live read-only: %w", err)
 }
 
 func openReadOnlyDatabase(dbPath string, immutable bool) (*StateDB, error) {
@@ -481,7 +495,8 @@ func (s *StateDB) Migrate() error {
 			pin             TEXT NOT NULL DEFAULT '',
 			last_sent_at    INTEGER NOT NULL DEFAULT 0,
 			tool_data       TEXT NOT NULL DEFAULT '{}',
-			acknowledged    INTEGER NOT NULL DEFAULT 0
+			acknowledged    INTEGER NOT NULL DEFAULT 0,
+			acknowledged_at INTEGER NOT NULL DEFAULT 0
 		)
 	`); err != nil {
 		return fmt.Errorf("statedb: create instances: %w", err)
@@ -702,6 +717,7 @@ func (s *StateDB) Migrate() error {
 	// See CLAUDE.md "Schema Migration Safety": every new column MUST have a corresponding ALTER TABLE.
 	alterMigrations := []string{
 		"ALTER TABLE instances ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE instances ADD COLUMN acknowledged_at INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE watcher_events ADD COLUMN triage_session_id TEXT NOT NULL DEFAULT ''",
 		// Slack-truncation fix: full message text alongside the (first-line,
 		// 200-byte) subject label, so the conductor bridge can forward the
@@ -747,6 +763,23 @@ func (s *StateDB) Migrate() error {
 			if !strings.Contains(err.Error(), "duplicate column") {
 				return fmt.Errorf("statedb: alter migration: %w", err)
 			}
+		}
+	}
+
+	// Sessions marked seen before acknowledged_at existed (or by an older
+	// binary sharing this database) have no visit time; use the last visit
+	// (last_accessed, whole seconds). A Stop that finished after it, even
+	// while agent-deck was closed, then still reads as unseen. Rows with no
+	// recorded visit stay at 0, so any Stop clears them as before. Count
+	// first: Migrate runs on every open, and an unconditional UPDATE would be
+	// a write per open.
+	var legacyAcks int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM instances WHERE acknowledged = 1 AND acknowledged_at = 0 AND last_accessed > 0`).Scan(&legacyAcks); err != nil {
+		return fmt.Errorf("statedb: count legacy acknowledgments: %w", err)
+	}
+	if legacyAcks > 0 {
+		if _, err := tx.Exec(`UPDATE instances SET acknowledged_at = last_accessed * 1000 WHERE acknowledged = 1 AND acknowledged_at = 0 AND last_accessed > 0`); err != nil {
+			return fmt.Errorf("statedb: backfill acknowledged_at: %w", err)
 		}
 	}
 
@@ -875,6 +908,33 @@ func archivedAtUnix(t time.Time) int64 {
 	return t.UTC().Unix()
 }
 
+// upsertInstanceSQL is the full-row write shared by SaveInstance and
+// saveInstancesOnce. InstanceRow does not model the seen mark (acknowledged /
+// acknowledged_at): it is written only by targeted paths (SetAcknowledged*,
+// and the running-write reset in WriteStatus & co.). INSERT OR REPLACE deletes
+// and re-inserts the row, so leaving those columns out reset them to their
+// defaults on every full save, wiping a mark another process wrote after this
+// process loaded its snapshot (#2986 item 2). The stored values are carried
+// over inside the statement itself (the VALUES subqueries run before the
+// replace deletes the old row), so a concurrent SetAcknowledged cannot be lost
+// in a pre-fetch/commit window. A row saved as "running" clears both, the same
+// rule as writeStatusSQL.
+//
+// Trailing parameters after pin: status, id, status, id.
+const upsertInstanceSQL = `
+		INSERT OR REPLACE INTO instances (
+			id, title, project_path, group_path, sort_order,
+			command, wrapper, tool, status, tmux_session, tmux_socket_name,
+			created_at, last_accessed,
+			parent_session_id, is_conductor, no_transition_notify,
+			worktree_path, worktree_repo, worktree_branch, account,
+			archived_at, tool_data, title_locked, auto_name, auto_name_description, pin,
+			acknowledged, acknowledged_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			CASE WHEN ? = 'running' THEN 0 ELSE COALESCE((SELECT acknowledged FROM instances WHERE id = ?), 0) END,
+			CASE WHEN ? = 'running' THEN 0 ELSE COALESCE((SELECT acknowledged_at FROM instances WHERE id = ?), 0) END)
+	`
+
 // SaveInstance inserts or replaces a single instance.
 func (s *StateDB) SaveInstance(inst *InstanceRow) error {
 	toolData := inst.ToolData
@@ -913,22 +973,14 @@ func (s *StateDB) SaveInstance(inst *InstanceRow) error {
 	if autoName {
 		autoNameInt = 1
 	}
-	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO instances (
-			id, title, project_path, group_path, sort_order,
-			command, wrapper, tool, status, tmux_session, tmux_socket_name,
-			created_at, last_accessed,
-			parent_session_id, is_conductor, no_transition_notify,
-			worktree_path, worktree_repo, worktree_branch, account,
-			archived_at, tool_data, title_locked, auto_name, auto_name_description, pin
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
+	_, err := s.db.Exec(upsertInstanceSQL,
 		inst.ID, inst.Title, inst.ProjectPath, inst.GroupPath, inst.Order,
 		inst.Command, inst.Wrapper, inst.Tool, inst.Status, inst.TmuxSession, inst.TmuxSocketName,
 		inst.CreatedAt.Unix(), inst.LastAccessed.Unix(),
 		inst.ParentSessionID, isConductorInt, noTransitionNotifyInt,
 		inst.WorktreePath, inst.WorktreeRepo, inst.WorktreeBranch, inst.Account,
 		archivedAtUnix(inst.ArchivedAt), string(toolData), titleLockedInt, autoNameInt, autoNameDescription, inst.Pin,
+		inst.Status, inst.ID, inst.Status, inst.ID,
 	)
 	return err
 }
@@ -1094,16 +1146,7 @@ func (s *StateDB) saveInstancesOnce(insts []*InstanceRow, sweep bool) error {
 		}
 	}
 
-	stmt, err := tx.Prepare(`
-		INSERT OR REPLACE INTO instances (
-			id, title, project_path, group_path, sort_order,
-			command, wrapper, tool, status, tmux_session, tmux_socket_name,
-			created_at, last_accessed,
-			parent_session_id, is_conductor, no_transition_notify,
-			worktree_path, worktree_repo, worktree_branch, account,
-			archived_at, tool_data, title_locked, auto_name, auto_name_description, pin
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`)
+	stmt, err := tx.Prepare(upsertInstanceSQL)
 	if err != nil {
 		return err
 	}
@@ -1141,6 +1184,7 @@ func (s *StateDB) saveInstancesOnce(insts []*InstanceRow, sweep bool) error {
 			inst.ParentSessionID, isConductorInt, noTransitionNotifyInt,
 			inst.WorktreePath, inst.WorktreeRepo, inst.WorktreeBranch, inst.Account,
 			archivedAtUnix(inst.ArchivedAt), string(toolData), titleLockedInt, autoNameInt, autoNameDescription, inst.Pin,
+			inst.Status, inst.ID, inst.Status, inst.ID,
 		); err != nil {
 			return err
 		}
@@ -1397,7 +1441,7 @@ func (s *StateDB) WriteStatus(id, status, tool string) error {
 		// Only read the prior value when someone listens: the write path
 		// stays one statement for every caller otherwise.
 		return withBusyRetry(func() error {
-			_, err := s.db.Exec(writeStatusSQL, status, tool, status, id)
+			_, err := s.db.Exec(writeStatusSQL, status, tool, status, status, id)
 			return err
 		})
 	}
@@ -1412,7 +1456,7 @@ func (s *StateDB) WriteStatus(id, status, tool string) error {
 		// The edge is claimed by the write that changes the row: when the
 		// TUI and the notify daemon both write the same transition, only
 		// one UPDATE matches status IS NOT ?, so only one publishes.
-		res, err := s.db.Exec(writeStatusSQL+` AND status IS NOT ?`, status, tool, status, id, status)
+		res, err := s.db.Exec(writeStatusSQL+` AND status IS NOT ?`, status, tool, status, status, id, status)
 		if err != nil {
 			return err
 		}
@@ -1420,7 +1464,7 @@ func (s *StateDB) WriteStatus(id, status, tool string) error {
 		changed = n > 0 && from != status
 		if n == 0 {
 			// Same status: still refresh tool and the acknowledged reset.
-			_, err = s.db.Exec(writeStatusSQL, status, tool, status, id)
+			_, err = s.db.Exec(writeStatusSQL, status, tool, status, status, id)
 		}
 		return err
 	})
@@ -1442,7 +1486,7 @@ func (s *StateDB) WriteStatusIfCurrent(id, expected, status, tool string) (bool,
 		if observe != nil {
 			_ = s.db.QueryRow(`SELECT tmux_session FROM instances WHERE id = ?`, id).Scan(&tmuxName)
 		}
-		res, err := s.db.Exec(writeStatusSQL+` AND status = ?`, status, tool, status, id, expected)
+		res, err := s.db.Exec(writeStatusSQL+` AND status = ?`, status, tool, status, status, id, expected)
 		if err != nil {
 			return err
 		}
@@ -1460,9 +1504,13 @@ func (s *StateDB) WriteStatusIfCurrent(id, expected, status, tool string) (bool,
 // status and its update, where a second writer can interleave.
 var afterStatusRead func()
 
+// A running write clears the seen mark and its visit time together, so an
+// unacked row never keeps an old acknowledged_at that an older binary's later
+// ack (which does not stamp the time) would revive past the Migrate backfill.
 const writeStatusSQL = `UPDATE instances
 	 SET status = ?, tool = ?,
-	     acknowledged = CASE WHEN ? = 'running' THEN 0 ELSE acknowledged END
+	     acknowledged = CASE WHEN ? = 'running' THEN 0 ELSE acknowledged END,
+	     acknowledged_at = CASE WHEN ? = 'running' THEN 0 ELSE acknowledged_at END
 	 WHERE id = ?`
 
 // StatusChange is one status row transition written through WriteStatus.
@@ -1600,7 +1648,8 @@ func (s *StateDB) PersistInstanceStatusesTx(updates []InstanceStatusUpdate) erro
 		stmt, err := tx.Prepare(
 			`UPDATE instances
 			   SET status = ?,
-			       acknowledged = CASE WHEN ? = 'running' THEN 0 ELSE acknowledged END
+			       acknowledged = CASE WHEN ? = 'running' THEN 0 ELSE acknowledged END,
+			       acknowledged_at = CASE WHEN ? = 'running' THEN 0 ELSE acknowledged_at END
 			 WHERE id = ?`,
 		)
 		if err != nil {
@@ -1609,7 +1658,7 @@ func (s *StateDB) PersistInstanceStatusesTx(updates []InstanceStatusUpdate) erro
 		defer stmt.Close()
 
 		for _, u := range updates {
-			if _, err := stmt.Exec(u.Status, u.Status, u.ID); err != nil {
+			if _, err := stmt.Exec(u.Status, u.Status, u.Status, u.ID); err != nil {
 				return err
 			}
 		}
@@ -1823,7 +1872,7 @@ func (s *StateDB) WriteLastAccessed(id string, at time.Time) error {
 // abort the whole query and silently blank every session's shared status;
 // the json_valid guard turns such a row into a NULL hook_lag instead.
 func (s *StateDB) ReadAllStatuses() (map[string]StatusRow, error) {
-	rows, err := s.db.Query(`SELECT id, status, tool, acknowledged,
+	rows, err := s.db.Query(`SELECT id, status, tool, acknowledged, acknowledged_at,
 		CASE WHEN json_valid(tool_data) THEN json_extract(tool_data, '$.hook_lag') ELSE NULL END
 		FROM instances`)
 	if err != nil {
@@ -1836,11 +1885,15 @@ func (s *StateDB) ReadAllStatuses() (map[string]StatusRow, error) {
 		var id string
 		var sr StatusRow
 		var ack int
+		var ackAt int64
 		var hookLag sql.NullString
-		if err := rows.Scan(&id, &sr.Status, &sr.Tool, &ack, &hookLag); err != nil {
+		if err := rows.Scan(&id, &sr.Status, &sr.Tool, &ack, &ackAt, &hookLag); err != nil {
 			return nil, err
 		}
 		sr.Acknowledged = ack != 0
+		if sr.Acknowledged && ackAt > 0 {
+			sr.AcknowledgedAt = time.UnixMilli(ackAt)
+		}
 		if hookLag.Valid && hookLag.String != "" {
 			sr.HookLag = json.RawMessage(hookLag.String)
 		}
@@ -1866,12 +1919,12 @@ func (s *StateDB) WriteToolDataExtra(id, key string, value json.RawMessage) erro
 
 // touchWithRetry stamps metadata.last_modified, retrying on SQLITE_BUSY.
 //
-// Touch() is a plain Exec, so under a concurrent writer it fails where the
-// retry-wrapped row UPDATE beside it would have succeeded — leaving the row
-// changed but the change unannounced. Every targeted writer that stamps its
-// own signal must retry the stamp as hard as it retried the write.
+// Every targeted writer that stamps its own signal must retry the stamp as hard
+// as it retried the write, or a concurrent writer leaves the row changed but
+// the change unannounced. Touch goes through touchStamp, which already retries
+// its transaction (withBusyRetry), so this is Touch itself.
 func (s *StateDB) touchWithRetry() error {
-	return withBusyRetry(func() error { return s.Touch() })
+	return s.Touch()
 }
 
 // SetAcknowledged sets or clears the acknowledged flag for an instance.
@@ -1892,12 +1945,12 @@ func (s *StateDB) SetAcknowledged(id string, ack bool) error {
 // STALE stored status. Same self-inflicted false positive WriteRestartOutcome's
 // stamps exist to prevent (#1868).
 func (s *StateDB) SetAcknowledgedStamped(id string, ack bool) (WriteStamps, error) {
-	v := 0
+	v, at := 0, int64(0)
 	if ack {
-		v = 1
+		v, at = 1, time.Now().UnixMilli()
 	}
 	if err := withBusyRetry(func() error {
-		_, err := s.db.Exec("UPDATE instances SET acknowledged = ? WHERE id = ?", v, id)
+		_, err := s.db.Exec("UPDATE instances SET acknowledged = ?, acknowledged_at = ? WHERE id = ?", v, at, id)
 		return err
 	}); err != nil {
 		return WriteStamps{}, err
@@ -2320,8 +2373,13 @@ func (s *StateDB) TakeMeta(key string) (string, error) {
 // --- Change Detection (replaces fsnotify) ---
 
 // Touch updates a metadata timestamp that other instances can poll to detect changes.
+//
+// It goes through touchStamp, so every bump of last_modified is serialized with
+// the others and moves forward from the stamp it replaces: a Touch whose clock
+// read was delayed cannot write a stamp older than one already committed.
 func (s *StateDB) Touch() error {
-	return s.SetMeta("last_modified", fmt.Sprintf("%d", time.Now().UnixNano()))
+	_, err := s.touchStamp()
+	return err
 }
 
 // LastModified returns the last_modified timestamp from metadata.

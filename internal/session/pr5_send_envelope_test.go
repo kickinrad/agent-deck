@@ -1,6 +1,8 @@
 package session
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -179,8 +181,8 @@ func TestPR5_NudgeGateAcceptsNonConductorReplyTarget(t *testing.T) {
 	if !parentIsNudgeableIdle(worker, "reply") {
 		t.Fatal("an idle non-conductor reply target must be nudgeable")
 	}
-	if !parentIsNudgeableIdle(worker, "parent") {
-		t.Fatal("an idle explicit parent that runs an agent is nudgeable")
+	if parentIsNudgeableIdle(worker, "parent") {
+		t.Fatal("a non-conductor parent target stays un-nudgeable")
 	}
 	busy := &Instance{ID: "w", Title: "api-worker", Tool: "claude", Status: StatusRunning}
 	if parentIsNudgeableIdle(busy, "reply") {
@@ -340,6 +342,44 @@ func TestPR5_IdentityPromptExplainsEnvelope(t *testing.T) {
 		!strings.Contains(got, "this session's turns are not reported, so reply with `agent-deck session send <id> \"answer\"`") {
 		t.Fatalf("no-notify identity prompt must ask for an explicit reply:\n%s", got)
 	}
+	// Its completion sentinel is recorded, not delivered.
+	if strings.Contains(got, "Your parent then receives one urgent record") ||
+		!strings.Contains(got, "the completion is still recorded and shows in `agent-deck session children`") {
+		t.Fatalf("no-notify identity prompt must say the completion is recorded, not delivered:\n%s", got)
+	}
+	// Its questions and progress are not delivered either.
+	if strings.Contains(got, "that wakes it") || strings.Contains(got, "delivered as progress") ||
+		!strings.Contains(got, "Questions and progress do not reach your parent either. To ask it something, use `agent-deck session send <parent-id> \"...\"`") {
+		t.Fatalf("no-notify identity prompt must not promise NEED:/progress delivery:\n%s", got)
+	}
+	// The global switch mutes every session the same way.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfgPath, err := GetUserConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte("[notifications]\ntransition_events = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ClearUserConfigCache()
+	globalOff := inst.BuildIdentityPrompt()
+	if strings.Contains(globalOff, "the sender is notified") || strings.Contains(globalOff, "Your parent then receives one urgent record") ||
+		strings.Contains(globalOff, "that wakes it") || !strings.Contains(globalOff, "the completion is still recorded") {
+		t.Fatalf("transition_events = false must give the muted wording:\n%s", globalOff)
+	}
+	if err := os.Remove(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	ClearUserConfigCache()
+	t.Cleanup(ClearUserConfigCache)
+	loud := inst.BuildIdentityPrompt()
+	if !strings.Contains(loud, "Your parent then receives one urgent record") || !strings.Contains(loud, "start a line with NEED:") {
+		t.Fatal("notifying session keeps the delivery and NEED: sentences")
+	}
 }
 
 func TestPR5_TagSendsConfigDefaultsOn(t *testing.T) {
@@ -434,8 +474,7 @@ func TestPR5_ParentBackpressureReplyNotRedeliveredAfterDrains(t *testing.T) {
 // Fix round 3 (verify r2 finding 2): an idle Claude parent that is NOT a
 // conductor asked its own child with a tagged send. The child's answer is a
 // reply to it, so it is woken (as a reply target) while the record stays
-// one "parent" copy. Any other parent that runs an agent is woken as a
-// parent for an urgent turn; a shell parent never is.
+// one "parent" copy. Other parents keep the conductor-only gate.
 func TestPR5_ParentThatAskedIsWokenForTheReply(t *testing.T) {
 	for _, tc := range []struct {
 		name, title, tool string
@@ -444,7 +483,7 @@ func TestPR5_ParentThatAskedIsWokenForTheReply(t *testing.T) {
 		wantKind          string
 	}{
 		{"non-conductor claude parent asked", "api-lead", "claude", true, true, "reply"},
-		{"non-conductor claude parent, human turn", "api-lead", "claude", false, true, "parent"},
+		{"non-conductor claude parent, human turn", "api-lead", "claude", false, false, "parent"},
 		{"non-conductor shell parent asked", "api-lead", "shell", true, false, "parent"},
 		{"conductor codex parent asked", "conductor-ops", "codex", true, true, "parent"},
 	} {

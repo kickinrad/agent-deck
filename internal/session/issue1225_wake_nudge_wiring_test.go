@@ -21,9 +21,9 @@ import (
 
 // newWakeNudgeFixture seeds a child→parent pair in a fresh profile and returns a
 // notifier plus a finished event whose commit resolves to parentID. The parent
-// has an ordinary title: an explicit parent link, not conductor residency,
-// governs delivery (the gate is unit-tested separately in
-// TestIssue1225_ParentIsNudgeableIdle).
+// is titled non-"conductor-" so resolveParentNotificationTarget keeps it live
+// without a tmux UpdateStatus (the conductor-scoping policy is unit-tested
+// separately in TestIssue1225_ParentIsNudgeableIdle).
 func newWakeNudgeFixture(t *testing.T) (*TransitionNotifier, string, TransitionNotificationEvent) {
 	t.Helper()
 	inboxTestHome(t)
@@ -158,11 +158,11 @@ func TestIssue1225_NudgeSendErrorIsHarmless(t *testing.T) {
 }
 
 // The PRODUCTION default wiring (not a test spy) is fully populated and routes
-// its idle probe through the parent gate end-to-end: any explicit parent that
-// runs an agent is nudgeable only when idle; a busy parent and a shell are
-// not. This guards against a future refactor silently swapping
-// defaultWakeNudgeWiring's isIdle for an unscoped probe.
-func TestIssue1225_DefaultWiringUsesParentIdleGate(t *testing.T) {
+// its idle probe through the conductor-scoped gate end-to-end: a conductor-
+// prefixed title is nudgeable only when idle, a busy conductor and a
+// non-conductor leaf are not. This guards against a future refactor silently
+// swapping defaultWakeNudgeWiring's isIdle for an unscoped probe.
+func TestIssue1225_DefaultWiringUsesConductorIdleGate(t *testing.T) {
 	withNoopStatusProbe(t)
 	w := defaultWakeNudgeWiring()
 	if w == nil || w.nudger == nil || w.now == nil || w.isIdle == nil || w.send == nil {
@@ -174,34 +174,28 @@ func TestIssue1225_DefaultWiringUsesParentIdleGate(t *testing.T) {
 	if w.isIdle(&Instance{ID: "c", Title: "conductor-x", Status: StatusRunning}, "parent") {
 		t.Fatal("default wiring must NOT nudge a busy conductor (send-keys would only queue)")
 	}
-	if !w.isIdle(&Instance{ID: "l", Title: "worker", Tool: "claude", Status: StatusIdle}, "parent") {
-		t.Fatal("default wiring must nudge an idle ordinary parent")
-	}
-	if w.isIdle(&Instance{ID: "s", Title: "worker", Tool: "shell", Status: StatusIdle}, "parent") {
-		t.Fatal("default wiring must NOT type a wake line into a shell")
+	if w.isIdle(&Instance{ID: "l", Title: "worker", Status: StatusIdle}, "parent") {
+		t.Fatal("default wiring must NOT nudge a non-conductor leaf (no inbox drain → noise)")
 	}
 }
 
-// The production idle-probe accepts any explicit parent that runs an agent,
-// and is only green when the pane is idle/waiting (not mid-turn).
+// The production idle-probe is conductor-scoped (only conductors drain an inbox)
+// and only green when the pane is idle/waiting (not mid-turn).
 func TestIssue1225_ParentIsNudgeableIdle(t *testing.T) {
 	withNoopStatusProbe(t)
 	cases := []struct {
 		title  string
-		tool   string
 		status Status
 		want   bool
 	}{
-		{"conductor-x", "claude", StatusIdle, true},
-		{"conductor-x", "claude", StatusWaiting, true},
-		{"conductor-x", "claude", StatusRunning, false}, // busy: send-keys would only queue
-		{"worker", "claude", StatusIdle, true},          // explicit parent, whatever its title
-		{"worker", "codex", StatusWaiting, true},
-		{"worker", "shell", StatusIdle, false}, // a shell would execute the line
-		{"conductor-x", "claude", StatusError, false},
+		{"conductor-x", StatusIdle, true},
+		{"conductor-x", StatusWaiting, true},
+		{"conductor-x", StatusRunning, false}, // busy: send-keys would only queue
+		{"worker", StatusIdle, false},         // non-conductor leaf: no inbox drain → noise
+		{"conductor-x", StatusError, false},
 	}
 	for _, c := range cases {
-		p := &Instance{ID: "p", Title: c.title, Tool: c.tool, Status: c.status}
+		p := &Instance{ID: "p", Title: c.title, Status: c.status}
 		if got := parentIsNudgeableIdle(p, "parent"); got != c.want {
 			t.Errorf("parentIsNudgeableIdle(title=%q,status=%q)=%v, want %v", c.title, c.status, got, c.want)
 		}

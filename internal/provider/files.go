@@ -2,6 +2,7 @@ package provider
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -186,6 +187,58 @@ func writePrivateFile(path string, data []byte) error {
 	}
 	ok = true
 	return nil
+}
+
+// ErrRemoteBusy means another agent-deck holds a sandbox remote's lock: a
+// create or a destroy of that remote is running.
+var ErrRemoteBusy = errors.New("remote is busy")
+
+// lockRemoteName takes the provisioning lock for remoteName (an flock on
+// <data dir>/sandboxes/.locks/<name>.lock, released when the process dies)
+// and returns its release. A held lock means another provisioning of that
+// name is running.
+func lockRemoteName(remoteName string) (func(), error) {
+	return lockRemote(remoteName, func() error {
+		return fmt.Errorf("remote %q is already being provisioned by another agent-deck; wait for it or pick another name", remoteName)
+	})
+}
+
+// LockRemote takes remoteName's sandbox lock for a destroy, the same lock a
+// create of that name holds, and returns its release. Every destroy holds
+// it from before it lists the remote's sessions until DestroyRemote
+// returns, so a second destroy of the same remote (in this agent-deck or
+// another) is refused with ErrRemoteBusy instead of racing the first.
+func LockRemote(remoteName string) (func(), error) {
+	return lockRemote(remoteName, func() error {
+		return fmt.Errorf("%w: another agent-deck is creating or destroying remote %q right now; wait for it to finish", ErrRemoteBusy, remoteName)
+	})
+}
+
+func lockRemote(remoteName string, busy func() error) (func(), error) {
+	dir, err := SandboxDir(remoteName)
+	if err != nil {
+		return nil, err
+	}
+	locks := filepath.Join(filepath.Dir(dir), ".locks")
+	if err := os.MkdirAll(locks, 0o700); err != nil {
+		return nil, fmt.Errorf("creating sandbox lock dir: %w", err)
+	}
+	// #nosec G304 -- the name passed ValidRemoteName (SandboxDir).
+	f, err := os.OpenFile(filepath.Join(locks, remoteName+".lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("opening sandbox lock for %q: %w", remoteName, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, busy()
+		}
+		return nil, fmt.Errorf("locking sandbox name %q: %w", remoteName, err)
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
 }
 
 // RemoveSandboxFiles removes remoteName's sandbox directory. A missing

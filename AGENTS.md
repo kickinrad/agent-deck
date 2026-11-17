@@ -46,7 +46,7 @@ reproduce in a container as [the repro workflow](skills/agent-deck/references/re
 
 ## Build and check exactly as CI does
 
-- Go 1.26.10 (from `go.mod`; the Makefile sets `GOTOOLCHAIN=go1.26.10`).
+- Go 1.26.11 (from `go.mod`; the Makefile sets `GOTOOLCHAIN=go1.26.11`).
 - Build `go build ./...` (or `make build`: runs `make css` first, downloads Tailwind to
   `~/.local/bin`). Then `gofmt -l .` prints nothing (worktree dirs aside) and `go vet ./...`
   passes, as the lefthook pre-commit hook checks. All safe on a host.
@@ -59,8 +59,10 @@ reproduce in a container as [the repro workflow](skills/agent-deck/references/re
   `gotestsum --rerun-fails=2 --rerun-fails-abort-on-data-race --packages="<pkgs>" -- -race -timeout 20m`.
   `make verify-docker` repeats this except the proof. Go diffs also run `Required native SSH
   acceptance` (Linux) and `Required macOS native SSH acceptance`.
-- Docs-only diffs skip the Go suite; the gate still reports. `pr-diffscope.yml` fails a PR
-  touching more than 200 files.
+- Docs-only diffs skip the Go suite; the gate still reports. A release PR that changes only
+  `CHANGELOG.md` and the `Version` line, on a base whose push `Go tests` run is green, skips
+  the shards for a short `Version-only release check` (`.github/scripts/version-only-diff.sh`).
+  `pr-diffscope.yml` fails a PR touching more than 200 files.
 
 ## Where code lives
 

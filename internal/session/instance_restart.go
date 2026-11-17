@@ -71,7 +71,7 @@ func (i *Instance) ensureClaudeSessionIDFromDiskForRestart() {
 		return
 	}
 	lookupPath := i.EffectiveWorkingDir()
-	uuid, found := discoverLatestClaudeJSONL(lookupPath)
+	uuid, found := discoverLatestClaudeJSONLForInstance(i, lookupPath)
 	if !found {
 		return
 	}
@@ -195,6 +195,53 @@ func (i *Instance) recreateTmuxSession() {
 	i.tmuxSession.SetIndicZeroWidthMarks(GetTmuxSettings().IndicZeroWidthMarks)
 	i.tmuxSession.SetClearOnRestart(GetTmuxSettings().ClearOnRestart)
 	i.tmuxSession.SetTerminalChromeEnabled(GetTerminalSettings().GetITermBadge())
+}
+
+// restoreTmuxBindingOnFailure puts the pre-recreate tmux session back onto
+// the instance when it still names a live session. The recreate path swaps
+// i.tmuxSession — and with it the name every later save persists — before
+// the replacement session is proven to exist, so a spawn that fails (or a
+// spawn subprocess killed externally before tmux ever ran) would otherwise
+// leave this instance bound to a name nothing answers on while the old
+// pane is still alive. Pointing back at the surviving session keeps the
+// pane attachable; a provably dead previous session is not restored.
+//
+// The verdict comes from ProbeExists, not Exists: a positive activity cache
+// can still describe a session we killed moments ago, and a completed
+// "session gone" probe is authoritative — while an inconclusive one (the
+// probe process itself was killed) errs toward the old binding, exactly the
+// reading that keeps the surviving pane reachable.
+//
+// Two cases never restore, whatever the old-name probe says:
+//   - prevKilled: the restart's own Kill() of the old session succeeded, so
+//     an inconclusive probe of that name must not resurrect it.
+//   - the replacement session exists: Start() can fail after new-session
+//     already ran (a later step such as send-keys), and rebinding then would
+//     leave the running replacement pane with nothing pointing at it.
+func (i *Instance) restoreTmuxBindingOnFailure(prevTmux *tmux.Session, prevKilled bool) {
+	if prevTmux == nil || prevTmux == i.tmuxSession {
+		return
+	}
+	if prevKilled {
+		mcpLog.Info("restart_binding_restore_skipped",
+			slog.String("session_name", prevTmux.Name),
+			slog.String("reason", "old_session_killed"))
+		return
+	}
+	if cur := i.tmuxSession; cur != nil {
+		if exists, probeErr := cur.ProbeExists(); exists && probeErr == nil {
+			mcpLog.Info("restart_binding_restore_skipped",
+				slog.String("session_name", prevTmux.Name),
+				slog.String("reason", "replacement_exists"))
+			return
+		}
+	}
+	if exists, probeErr := prevTmux.ProbeExists(); !exists && probeErr == nil {
+		return
+	}
+	mcpLog.Info("restart_binding_restored",
+		slog.String("session_name", prevTmux.Name))
+	i.tmuxSession = prevTmux
 }
 
 func (i *Instance) prepareRestartMCPConfig() {
@@ -433,11 +480,26 @@ func (i *Instance) restartRecorded(env map[string]string, sf telemetry.Surface) 
 	// restart_resume.go).
 	noteRestartToken(i, time.Now())
 	queued := i.leftQueue()
+	fresh, hadFresh := readFreshStartToken(i.ID)
 	err := i.restart(env)
+	lost := errors.Is(err, errRestartLostSpawn)
+	if lost {
+		err = nil
+	}
+	i.launchesFresh.Store(false)
 	if err != nil {
 		clearRestartToken(i.ID)
 	} else {
 		markRestartSpawned(i, time.Now())
+		// A resuming restart leaves no fresh-start token (#2954,
+		// fresh_start.go): its boot is the restart's to judge. Nor does what
+		// the resume builder noted. (RestartFresh, a new conversation, gets
+		// one through Start.) Only the token read before, and only when this
+		// restart spawned: a concurrent Start that won the spawn lock keeps
+		// its own, written before or after that read.
+		if hadFresh && !lost {
+			spendFreshStartToken(i.ID, fresh)
+		}
 	}
 	if err == nil {
 		// LastStartedAt covers restarts too (its contract), so the idle
@@ -454,6 +516,11 @@ func (i *Instance) restartRecorded(env map[string]string, sf telemetry.Surface) 
 	return err
 }
 
+// errRestartLostSpawn is restart's report that a concurrent spawn won the
+// lock while it waited, so it spawned nothing (restartRecorded treats it as
+// success).
+var errRestartLostSpawn = errors.New("restart superseded by a concurrent spawn")
+
 func (i *Instance) restart(env map[string]string) (err error) {
 	if err := i.ValidateAccount(); err != nil {
 		return err
@@ -468,7 +535,7 @@ func (i *Instance) restart(env map[string]string) (err error) {
 	// spawn won while this call waited for the lock, restart that fresh process
 	// so the requested environment is not silently discarded.
 	if spawnedSince(i.ID, beforeLock) && len(env) == 0 {
-		return nil
+		return errRestartLostSpawn
 	}
 	// #1873: the case this issue reports IS a restart — a pane that died during
 	// startup, a wrapped tree that escaped it, and a later legitimate restart
@@ -505,6 +572,15 @@ func (i *Instance) restart(env map[string]string) (err error) {
 	// receipt would be an unowned tree.
 	ownershipCommand := i.Command
 	defer func() { i.commitOwnershipAfterRestart(ownershipCommand) }()
+	// Every successful exit spawned a replacement, whose launch decision must be
+	// recorded: the respawn-pane fast paths return early, and only the recreate
+	// path below folds it into its outcome write.
+	launchRecorded := false
+	defer func() {
+		if err == nil && !launchRecorded {
+			i.persistLaunchDecision()
+		}
+	}()
 
 	// #1775: supersede the fast-death watcher from the PREVIOUS spawn here, at
 	// the single entry point, rather than deeper down. restart() has several
@@ -914,10 +990,14 @@ func (i *Instance) restart(env map[string]string) (err error) {
 	// this path and every early-returning respawn fast path alike.)
 
 	// Kill old tmux session to prevent orphans before recreating (#138)
-	if i.tmuxSession != nil && i.tmuxSession.Exists() {
-		mcpLog.Debug("restart_killing_old_session", slog.String("session_name", i.tmuxSession.Name))
-		if killErr := i.tmuxSession.Kill(); killErr != nil {
+	prevTmux := i.tmuxSession
+	prevKilled := false
+	if prevTmux != nil && prevTmux.Exists() {
+		mcpLog.Debug("restart_killing_old_session", slog.String("session_name", prevTmux.Name))
+		if killErr := prevTmux.Kill(); killErr != nil {
 			mcpLog.Warn("restart_kill_old_session_failed", slog.String("error", killErr.Error()))
+		} else {
+			prevKilled = true
 		}
 	}
 
@@ -949,6 +1029,7 @@ func (i *Instance) restart(env map[string]string) (err error) {
 		// session shows no state at all. The freshly respawned process sits at
 		// its prompt, which is exactly "waiting".
 		if _, err := i.seedHermesHookGeneration("waiting", false); err != nil {
+			i.restoreTmuxBindingOnFailure(prevTmux, prevKilled)
 			return fmt.Errorf("seed hermes restart baseline: %w", err)
 		}
 		command = i.buildHermesCommand(i.Command)
@@ -1022,6 +1103,7 @@ func (i *Instance) restart(env map[string]string) (err error) {
 	command, containerName, err := i.prepareCommand(command)
 	if err != nil {
 		i.recordPrepareFailure(command, err) // #1924, sister path
+		i.restoreTmuxBindingOnFailure(prevTmux, prevKilled)
 		return err
 	}
 	ownershipCommand = command
@@ -1045,6 +1127,7 @@ func (i *Instance) restart(env map[string]string) (err error) {
 	mcpLog.Debug("restart_starting_new_session", slog.String("command", logging.RedactCommandEnv(command)))
 	command, err = i.wrapTrackedCommandExit(command)
 	if err != nil {
+		i.restoreTmuxBindingOnFailure(prevTmux, prevKilled)
 		return err
 	}
 
@@ -1057,6 +1140,7 @@ func (i *Instance) restart(env map[string]string) (err error) {
 		// changed something and is most likely to ask "why?" was the one that
 		// set StatusError with nothing to show for it.
 		i.recordTmuxStartFailure(command, err)
+		i.restoreTmuxBindingOnFailure(prevTmux, prevKilled)
 		i.Status = StatusError
 		return fmt.Errorf("failed to restart tmux session: %w", err)
 	}
@@ -1123,6 +1207,7 @@ func (i *Instance) restart(env map[string]string) (err error) {
 	// one fact about the restart. See restart_tmux_persist.go for why this is a
 	// targeted write and why a failure here is recorded rather than returned.
 	i.recordRestartOutcome()
+	launchRecorded, _ = i.RestartTmuxNameRecorded() // a failed outcome write leaves it to the deferred write
 
 	return nil
 }
@@ -1156,15 +1241,28 @@ func (i *Instance) RestartFresh() error {
 	// the one most likely to write a spurious failure.
 	i.bumpSpawnGenAndBarrier()
 
-	if i.tmuxSession != nil && i.tmuxSession.Exists() {
-		if killErr := i.tmuxSession.Kill(); killErr != nil {
+	prevTmux := i.tmuxSession
+	prevKilled := false
+	if prevTmux != nil && prevTmux.Exists() {
+		if killErr := prevTmux.Kill(); killErr != nil {
 			mcpLog.Warn("restart_fresh_kill_old_session_failed", slog.String("error", killErr.Error()))
+		} else {
+			prevKilled = true
 		}
 	}
+
+	// #2921: Kill only starts reaping the old pane's processes, and Start's
+	// ownership gate (#1873) refuses while the old spawn's receipt still names
+	// a live process outside any pane. A process that ignores tmux's SIGHUP
+	// (Claude Code 2.1.27+) is exactly that, and even one that obeys it may not
+	// have exited yet. Tearing the old spawn down is what a fresh restart asks
+	// for, so reap what its receipt owns, identity-checked, as a stop does.
+	i.clearOwnershipAfterTeardown(false)
 
 	i.recreateTmuxSession()
 
 	if err := i.Start(); err != nil {
+		i.restoreTmuxBindingOnFailure(prevTmux, prevKilled)
 		i.hermesStartFresh = false // a failed start must not make a later one fresh
 		i.Status = StatusError
 		return fmt.Errorf("failed to restart session fresh: %w", err)

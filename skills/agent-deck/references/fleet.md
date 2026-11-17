@@ -66,6 +66,12 @@ Useful flags:
 - `--parent <id>` — explicitly parent the child to the actual delegator. Use
   the full session ID and long form.
 - `--no-assert-done` — skip the completion-sentinel instruction.
+- `--no-tag` — do not start the message with the `[agent-deck from:<your id>]`
+  envelope. By default a launch from inside your session tags it, so the child's
+  first turn counts as a reply to you: when that turn ends with the completion
+  sentinel, a question or an error, you are woken if you are an idle Claude
+  session, even if you are not a conductor. A child launched with
+  `--no-transition-notify` is never tagged.
 
 ### 2. Keep working
 

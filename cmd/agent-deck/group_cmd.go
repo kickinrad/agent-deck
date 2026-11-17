@@ -120,6 +120,59 @@ func printGroupHelp() {
 	fmt.Println("  agent-deck group reorder mobile --position 0")
 }
 
+// groupListRefreshStatus refreshes one session's status for the group
+// listings; a variable so tests can count the refreshes.
+var groupListRefreshStatus = func(inst *session.Instance) { _ = inst.UpdateStatus() }
+
+// refreshGroupTreeStatuses refreshes every session in the tree once. The
+// group listings count each group's whole subtree, so a session is counted
+// once per ancestor; refreshing it at each count cost one full status pass
+// per level (three for deck/ashesh/archive) on every `group list` and on
+// every remote-agent change probe.
+// GroupList is walked first for a stable order; Groups (what the counts
+// read) catches any group GroupList lacks.
+func refreshGroupTreeStatuses(groupTree *session.GroupTree) {
+	seen := make(map[*session.Instance]struct{})
+	refresh := func(g *session.Group) {
+		for _, sess := range g.Sessions {
+			// Archived sessions are not counted (groupListSessions), so
+			// their status is not worth a tmux round-trip.
+			if sess.IsArchived() {
+				continue
+			}
+			if _, ok := seen[sess]; !ok {
+				seen[sess] = struct{}{}
+				groupListRefreshStatus(sess)
+			}
+		}
+	}
+	for _, g := range groupTree.GroupList {
+		refresh(g)
+	}
+	for _, g := range groupTree.Groups {
+		refresh(g)
+	}
+}
+
+// groupListSessions returns the sessions `group list` counts for path: the
+// group's own and its subgroups' ("" for every group), leaving archived
+// sessions out. #3127 made archived sessions stay out of every status count
+// (`status`, the TUI header pill and group rows, the group preview, remote
+// rows); `group list` follows the same rule for its status counts,
+// session_count and total_sessions, so an old archived row that kept its
+// `error` status no longer shows up as an error here. The group itself is
+// still listed, like an empty group.
+func groupListSessions(groupTree *session.GroupTree, path string) []*session.Instance {
+	var out []*session.Instance
+	for p, g := range groupTree.Groups {
+		if path != "" && p != path && !strings.HasPrefix(p, path+"/") {
+			continue
+		}
+		out = append(out, session.FilterInstancesByArchive(g.Sessions, false)...)
+	}
+	return out
+}
+
 // buildGroupListJSON is the body of `group list --json`: the group tree with
 // recursive session and status counts, as the indented object the CLI
 // prints, trailing newline included. handleGroupList prints it and the
@@ -144,32 +197,31 @@ func buildGroupListJSON(groupTree *session.GroupTree) ([]byte, error) {
 		Children     []groupJSON      `json:"children,omitempty"`
 	}
 
+	refreshGroupTreeStatuses(groupTree)
+
 	// Build hierarchical structure (with recursive session counts - Issue #48)
 	buildGroupJSON := func(g *session.Group) groupJSON {
 		// Count status recursively for this group and all subgroups
+		// (archived sessions left out, see groupListSessions).
 		status := groupStatusJSON{}
-		for path, subGroup := range groupTree.Groups {
-			if path == g.Path || strings.HasPrefix(path, g.Path+"/") {
-				for _, sess := range subGroup.Sessions {
-					_ = sess.UpdateStatus() // Refresh status
-					switch sess.Status {
-					case session.StatusRunning:
-						status.Running++
-					case session.StatusWaiting:
-						status.Waiting++
-					case session.StatusIdle:
-						status.Idle++
-					case session.StatusError:
-						status.Error++
-					case session.StatusStopped:
-						status.Stopped++
-					}
-				}
+		sessions := groupListSessions(groupTree, g.Path)
+		for _, sess := range sessions {
+			switch sess.Status {
+			case session.StatusRunning:
+				status.Running++
+			case session.StatusWaiting:
+				status.Waiting++
+			case session.StatusIdle:
+				status.Idle++
+			case session.StatusError:
+				status.Error++
+			case session.StatusStopped:
+				status.Stopped++
 			}
 		}
 
 		// Use recursive session count
-		sessCount := groupTree.SessionCountForGroup(g.Path)
+		sessCount := len(sessions)
 		gj := groupJSON{
 			Name:         g.Name,
 			Path:         g.Path,
@@ -207,7 +259,7 @@ func buildGroupListJSON(groupTree *session.GroupTree) ([]byte, error) {
 
 	// Count totals
 	totalGroups := len(groupTree.Groups)
-	totalSessions := groupTree.SessionCount()
+	totalSessions := len(groupListSessions(groupTree, ""))
 
 	output, err := json.MarshalIndent(map[string]interface{}{
 		"groups":         groupsJSON,
@@ -287,6 +339,8 @@ func handleGroupList(profile string, args []string) {
 	sb.WriteString(fmt.Sprintf("%-20s %-10s %s\n", "NAME", "SESSIONS", "STATUS"))
 	sb.WriteString(strings.Repeat("-", 50) + "\n")
 
+	refreshGroupTreeStatuses(groupTree)
+
 	// Track which groups we've printed to handle hierarchy
 	printedPaths := make(map[string]bool)
 
@@ -325,24 +379,21 @@ func handleGroupList(profile string, args []string) {
 		}
 
 		// Count sessions and status for this group (including subgroups - Issue #48)
-		sessCount := groupTree.SessionCountForGroup(g.Path)
+		// Archived sessions are left out (groupListSessions).
+		sessions := groupListSessions(groupTree, g.Path)
+		sessCount := len(sessions)
 		statusStr := ""
 		if sessCount > 0 {
 			running, waiting, idle := 0, 0, 0
 			// Count status recursively for all sessions in this group and subgroups
-			for path, subGroup := range groupTree.Groups {
-				if path == g.Path || strings.HasPrefix(path, g.Path+"/") {
-					for _, sess := range subGroup.Sessions {
-						_ = sess.UpdateStatus()
-						switch sess.Status {
-						case session.StatusRunning:
-							running++
-						case session.StatusWaiting:
-							waiting++
-						case session.StatusIdle:
-							idle++
-						}
-					}
+			for _, sess := range sessions {
+				switch sess.Status {
+				case session.StatusRunning:
+					running++
+				case session.StatusWaiting:
+					waiting++
+				case session.StatusIdle:
+					idle++
 				}
 			}
 			var parts []string
@@ -364,7 +415,7 @@ func handleGroupList(profile string, args []string) {
 	}
 
 	totalGroups := len(groupTree.Groups)
-	totalSessions := groupTree.SessionCount()
+	totalSessions := len(groupListSessions(groupTree, ""))
 	sb.WriteString(fmt.Sprintf("\nTotal: %d groups, %d sessions\n", totalGroups, totalSessions))
 
 	out.Print(sb.String(), nil)

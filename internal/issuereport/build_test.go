@@ -234,6 +234,7 @@ func TestNewIssueURL_SmallIsUntrimmed(t *testing.T) {
 
 // A huge log is cut first, newest lines kept, and the user's text stays whole.
 func TestNewIssueURL_HugeLogTrimsLogFirst(t *testing.T) {
+	t.Parallel() // pure CPU, no env or identity change; overlaps the other long case
 	var lines []string
 	for i := 0; i < 20000; i++ {
 		lines = append(lines, "log line number "+strings.Repeat("x", 30)+" #"+strconv.Itoa(i))
@@ -268,6 +269,7 @@ func TestNewIssueURL_HugeLogTrimsLogFirst(t *testing.T) {
 
 // When the user text alone is too long, it is cut too and the URL still fits.
 func TestNewIssueURL_HugeTextStillFits(t *testing.T) {
+	t.Parallel() // pure CPU, no env or identity change; overlaps the other long case
 	d := testDiag
 	d.LogExcerpt = strings.Repeat("noise\n", 5000)
 	is := Build(Report{Kind: KindBug, Title: strings.Repeat("T", 300), WhatHappened: strings.Repeat("é ü long text ", 3000),
@@ -282,5 +284,47 @@ func TestNewIssueURL_HugeTextStillFits(t *testing.T) {
 	}
 	if !strings.Contains(body, "Filed from agent-deck cli") {
 		t.Fatal("footer lost while trimming")
+	}
+}
+
+// An agent's report declares AI authorship with a value the forms accept.
+func TestBuild_AIAuthoredMatchesTemplate(t *testing.T) {
+	for _, tc := range []struct {
+		kind  Kind
+		form  string
+		model string
+		want  string
+	}{
+		{KindBug, "bug.yml", "", "unsure"},
+		{KindBug, "bug.yml", "claude-opus-5", "claude-opus-5"},
+		{KindIdea, "feature.yml", "", "unsure"},
+	} {
+		form := loadForm(t, tc.form)
+		is := Build(Report{Kind: tc.kind, Title: "Fork is slow", WhatHappened: "fork took five minutes",
+			AIAuthored: true, AIModel: tc.model}, testDiag)
+		v := sectionContent(t, is.Body, hAIDisclosure)
+		if !contains(form.options("ai_disclosure"), v) || !strings.HasPrefix(v, "AI-authored") {
+			t.Errorf("%s: AI disclosure %q, want the AI-authored option of %v", tc.form, v, form.options("ai_disclosure"))
+		}
+		if got := sectionContent(t, is.Body, hAIModel); got != tc.want {
+			t.Errorf("%s: model = %q, want %q", tc.form, got, tc.want)
+		}
+	}
+}
+
+// A title that already carries the kind prefix (once or more) gets it once.
+func TestBuild_NoDoubledKindPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		kind        Kind
+		title, want string
+	}{
+		{KindBug, "[bug] Fork is slow", "[bug] Fork is slow"},
+		{KindBug, "[BUG] [bug]  Fork is slow", "[bug] Fork is slow"},
+		{KindIdea, "[feature] Dark mode", "[feature] Dark mode"},
+		{KindBug, "Fork [bug] is slow", "[bug] Fork [bug] is slow"},
+	} {
+		if got := Build(Report{Kind: tc.kind, Title: tc.title, WhatHappened: "x"}, testDiag).Title; got != tc.want {
+			t.Errorf("Build(%q).Title = %q, want %q", tc.title, got, tc.want)
+		}
 	}
 }

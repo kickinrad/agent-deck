@@ -155,6 +155,12 @@ func handleSessionShow(profile string, args []string) {
 		// what actually happened is "this build predates the field".
 		"hook_status":       hookStatus,
 		"hook_status_fresh": hookStatusFresh,
+		// Matches list --json. An archived session's pane is gone on purpose,
+		// so its "status" alone cannot tell an archive from a crash.
+		"archived": inst.IsArchived(),
+	}
+	if archivedAt := inst.ArchivedAtThreadSafe(); !archivedAt.IsZero() {
+		jsonData["archived_at"] = archivedAt
 	}
 	// Durable queued sends, the same entries as `session queue list --json`.
 	if *jsonOutput {
@@ -253,10 +259,16 @@ func handleSessionShow(profile string, args []string) {
 			jsonData["codex_hooks_config"] = codexHooksConfig
 		}
 	}
+	// Same for a pi session without the agent-deck extension (#3098).
+	piHooks := piHooksStateForInstance(inst)
+	if piHooks.State != "" {
+		jsonData["pi_hooks"] = piHooks
+	}
 
 	if tmuxSession := inst.GetTmuxSession(); tmuxSession != nil {
 		jsonData["tmux_session"] = tmuxSession.Name
 	}
+	addTmuxRouteJSON(jsonData, inst)
 	// Who else has this session open (shared attach). Present only when tmux
 	// answered: [] is "nobody", an absent key is "unknown".
 	viewers, viewersKnown := inst.Viewers(context.Background())
@@ -375,6 +387,9 @@ func handleSessionShow(profile string, args []string) {
 	if codexHooksState != "" {
 		sb.WriteString(fmt.Sprintf("Codex:   %s\n", codexHooksLine(codexHooksState, codexHooksConfig)))
 	}
+	if piHooks.State != "" {
+		sb.WriteString(fmt.Sprintf("pi:      %s\n", piHooksLine(piHooks)))
+	}
 
 	if inst.NoTransitionNotify {
 		sb.WriteString("Notify:  transition events suppressed\n")
@@ -458,6 +473,7 @@ func handleSessionSet(profile string, args []string) {
 		fmt.Println("  wait-timeout       Wait timer (claude): after a question with a \"(Recommended)\" option under the cursor has waited this long, take that option; never permission/trust prompts (Go duration >= 1m, e.g. 5m; off disables; empty uses [sessions] wait_timeout)")
 		fmt.Println("  order              0-based position in the group (see `session show --json` .order); clamps to the end")
 		fmt.Println("  intended-switch    Mark the CURRENT account+model as switched on purpose (value = reason; 24h); '' clears")
+		fmt.Println("  tmux-socket        tmux -L socket of a STOPPED session ('' = default server); the next start runs there with [tmux.binaries]")
 		fmt.Println()
 		fmt.Println("Intended switches:")
 		fmt.Println("  `account`/`model` with --intended \"<reason>\" record the switch as intended until --intended-for")

@@ -40,6 +40,7 @@ All options for `$XDG_CONFIG_HOME/agent-deck/config.toml` (default `~/.config/ag
 - [[costs.budgets] and [costs.run_budget]](#costsbudgets-and-costsrun_budget)
 - [[remotes.<name>] Talkback](#remotesname-talkback)
 - [[providers.<name>] Sandbox providers](#providersname-sandbox-providers)
+- [[sandbox] Section](#sandbox-section)
 - [[health] Section](#health-section)
 - [[status] Section](#status-section)
 - [[performance] Section](#performance-section)
@@ -47,6 +48,7 @@ All options for `$XDG_CONFIG_HOME/agent-deck/config.toml` (default `~/.config/ag
 - [[macapp] Section](#macapp-section)
 - [[browser] Section](#browser-section)
 - [[ask] Section](#ask-section)
+- [[feedback] Section](#feedback-section)
 - [[tmux] Section](#tmux-section)
 - [Skills Registry (Outside config.toml)](#skills-registry-outside-configtoml)
 - [[mcp_pool] Section](#mcp_pool-section)
@@ -158,7 +160,7 @@ prompt_suggestions = "on"          # Optional override of [launch].prompt_sugges
 | `env_file` | string | `""` | A .env file sourced for Claude sessions only. Sourced after global `[shell].env_files`. See [Path Resolution](#path-resolution). |
 | `hooks_enabled` | bool | `true` | Enables Claude Code lifecycle hooks for real-time status detection. Set `false` to opt out of hook-based detection and the TUI install prompt. |
 | `statusline_feed` | bool | `true` | Lets `agent-deck hooks install` and the automatic repair wrap Claude's `statusLine` with `agent-deck usage statusline-wrap`, which records each session's model, context and 5h/7d (`usage statusline`, `usage.statusline` events) and then runs your previous command unchanged (or prints a short default line when there was none). The active Claude config is wrapped only while agent-deck's hooks are installed there; named account slots are always wrapped. Set `false` to leave every `statusLine` untouched; `hooks uninstall` still restores one that was wrapped earlier from `agent-deck-statusline-backup.json`. |
-| `command` | string | `"claude"` | Override the binary/invocation (e.g., `"cdw"` for a wrapper that sets `CLAUDE_CONFIG_DIR`). |
+| `command` | string | `"claude"` | Override the binary/invocation (e.g., `"cdw"` for a wrapper that sets `CLAUDE_CONFIG_DIR`). Forks use it too when its first word is an executable (an absolute path, or found on `PATH`); a fork runs under a non-interactive `bash -c` where shell aliases do not exist, so an alias forks with the literal `claude`. SSH and sandboxed forks always use `claude`. |
 
 Config resolution order for Claude config dir:
 1. `CLAUDE_CONFIG_DIR` env var
@@ -1117,6 +1119,7 @@ enabled = true         # tmux status-bar notification bar
 max_shown = 6
 show_all = false
 minimal = false
+sort = "waiting"       # or "last_accessed"
 transition_events = true
 desktop = false        # OS notification when a session needs input
 ```
@@ -1127,7 +1130,8 @@ desktop = false        # OS notification when a session needs input
 | `max_shown` | int | `6` | Maximum sessions listed in the bar. |
 | `show_all` | bool | `false` | List every session with a status icon instead of only waiting ones. |
 | `minimal` | bool | `false` | Compact icon+count summary instead of names. Disables the `Ctrl+b 1-6` jump bindings and ignores `show_all`. |
-| `transition_events` | bool | `true` | Send a tmux message to a session's **parent** when a child transitions (e.g. running → waiting). Per-session override: `agent-deck session set-transition-notify <id> off`. |
+| `sort` | string | `"waiting"` | Order of the bar, and so which session each `Ctrl+b` number key jumps to. `"waiting"` lists the session that started waiting most recently first (with `show_all`, sessions that are not waiting are placed by the same time, which falls back to when they were created). `"last_accessed"` lists the session you used most recently first, like Alt+Tab; sessions never used come last. Only visits through the agent-deck TUI count: attaching from its session list and jumping with the bar's `Ctrl+b` number keys. Attaching with the `agent-deck` CLI or the web UI does not change the order. Ignored when `minimal = true`, which shows no names. Any other value is treated as `"waiting"`. |
+| `transition_events` | bool | `true` | Send a tmux message to a session's **parent** when a child transitions (e.g. running → waiting). Per-session override: `agent-deck session set-transition-notify <id> off`. A muted child's completion is still recorded (`agent-deck session children`) and logged (`done_suppressed`), and is neither delivered nor exported. |
 | `desktop` | bool | `false` | Raise an **OS notification** when a session starts waiting for input or errors out. |
 
 ### desktop
@@ -1153,6 +1157,7 @@ max_text_bytes = 600        # child text carried on a record (hard max 2048)
 info_digest_minutes = 15    # how long info may wait before a digest wakes an idle parent (0 = never)
 question_wakes = true       # a trailing "?" / NEED: / QUESTION: line is urgent
 journal_keep = 256          # per-child turn journal length (runtime/turn-journal/<child>.jsonl)
+wake_parents = false        # also wake an idle Claude parent that is not a conductor
 
 [conductors.myconductor.inbox]   # per-conductor override, same keys
 wake_on = ["urgent", "info"]     # restores a wake per recorded turn for this conductor
@@ -1160,10 +1165,11 @@ wake_on = ["urgent", "info"]     # restores a wake per recorded turn for this co
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `wake_on` | []string | `["urgent"]` | Tiers that type a wake into an idle parent the moment a record lands. Records with no tier (older producers) always wake. `info` records never wake on their own: they stay in the durable inbox and are delivered on the parent's next Stop-hook drain or heartbeat. |
+| `wake_on` | []string | `["urgent"]` | Tiers that type a wake into an idle parent the moment a record lands. Who is a wake target: a conductor; a Claude parent whose own tagged `session send` (or `launch` kickoff) the child answered; and, with `wake_parents = true`, any Claude parent. Any other parent reads its records on its next turn. Records with no tier (older producers) always wake. `info` records never wake on their own: they stay in the durable inbox and are delivered on the parent's next Stop-hook drain or heartbeat. |
 | `max_text_bytes` | int | `600` | Bytes of the child's final assistant text carried on a record (`text`); clipped on a rune boundary with `…`. Hard ceiling 2048. |
 | `info_digest_minutes` | int | `15` | Reserved for the info digest: an idle parent with info waiting longer than this gets one digest wake. `0` disables the digest. |
 | `question_wakes` | bool | `true` | Treat a parent-facing question (last line ends with `?`, or a `NEED:`/`QUESTION:`/`ASK:` line) as urgent. |
+| `wake_parents` | bool | `false` | Lets a record whose tier is in `wake_on` wake an idle Claude-compatible parent that is not a conductor (#3131): for ordinary sessions that orchestrate children (a coordinator that launches workers and ends its turn to wait). Same gate as a conductor wake: the parent must be idle (re-probed), wakes to one parent within 500 ms collapse to one, a wake never types over text a person left in the parent's input box (it waits, then skips the wake and leaves the text alone), and a wake into a parent that is not a conductor is also skipped while it shows a menu or a permission dialog (`--require-input-prompt`); the record still arrives on the next turn. The info digest stays conductor-only. Off by default because a wake starts a turn (and costs tokens) in a session a person may be using. Set it in `[inbox]`; a per-conductor block does not apply to non-conductors. |
 | `journal_keep` | int | `256` | Lines kept per child in the turn journal (`agent-deck inbox stats` reads the counters, the journal is the per-turn history). |
 
 Measure the effect with `agent-deck inbox stats self` (or `--all`): records by tier, turns suppressed as noise or duplicates, wakeups fired and withheld, bytes injected.
@@ -1193,7 +1199,7 @@ tag_sends = true   # prefix agent-originated sends with [agent-deck from:<id>]
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `tag_sends` | bool | `true` | A `session send` from inside an agent-deck session (`AGENTDECK_INSTANCE_ID` set) to a Claude target starts with one `[agent-deck from:<sender-id>]` line, so the receiver's reply is classified as a send and, when the sender is not the receiver's parent, committed to the sender's inbox as an urgent `reply` record that wakes it (also when the receiver has no parent). `false` turns tagging off for every send (`--no-tag` does it per send). Human shells, senders that are not Claude-compatible sessions, `--draft`, bare slash commands, heartbeats, sends to oneself and non-Claude targets are never tagged. |
+| `tag_sends` | bool | `true` | A `session send` from inside an agent-deck session (`AGENTDECK_INSTANCE_ID` set) to a Claude target starts with one `[agent-deck from:<sender-id>]` line, so the receiver's reply is classified as a send and, when the sender is not the receiver's parent, committed to the sender's inbox as an urgent `reply` record that wakes it (also when the receiver has no parent). `false` turns tagging off for every send (`--no-tag` does it per send). The same tag goes on a `launch` initial message when the calling session is the child's linked parent and the child's turns are reported to it (#3131; `launch --no-tag` per launch), so the child's first turn answers the parent. Human shells, senders that are not Claude-compatible sessions, `--draft`, bare slash commands, heartbeats, sends to oneself and non-Claude targets are never tagged. |
 
 ## [costs.budgets] and [costs.run_budget]
 
@@ -1269,15 +1275,29 @@ agent_deck_path = ""
 | `timeout_seconds` | int | `60` | Time limit for `list`, `status` and `destroy` calls. |
 | `agent_deck_path` | string | `"agent-deck"` | agent-deck path on this provider's sandboxes, copied into each remote it creates as `agent_deck_path`. |
 
-Provider output is untrusted and validated before use: sandbox id, host (DNS name or IP literal only), port, user, auth (`key` with a private key file that is a regular file, not a symlink, owned by you and mode `0600`/`0400`; or `agent`), labels, state and pinned host keys. A sandbox the provider created but agent-deck cannot use (invalid answer, ssh never answers, agent-deck cannot be installed) is destroyed again and the remote is not kept.
+Provider output is untrusted and validated before use: sandbox id, host (DNS name or IP literal only), port, user, auth (`key` with a private key file that is a regular file, not a symlink, owned by you and mode `0600`/`0400`; or `agent`), labels, state and pinned host keys. A sandbox the provider created but agent-deck cannot use (invalid answer, ssh never answers, agent-deck cannot be installed) is destroyed again and the remote is not kept. A create that times out or is interrupted is followed by a `list`, and the sandbox carrying that request's `agent-deck/create-id` label is destroyed.
 
-A sandbox remote is an ordinary `[remotes.<name>]` entry with three more keys, all written by agent-deck:
+A sandbox remote is an ordinary `[remotes.<name>]` entry with four more keys, all written by agent-deck:
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `provider` | string | The `[providers.<name>]` that created the sandbox. `remote destroy` only works on remotes that have it; `remote list` shows them as `sandbox (provider <name>)`. |
 | `sandbox_id` | string | The provider's id for the sandbox. |
-| `ssh_config` | string | Path of the sandbox's own ssh config, `<agent-deck data dir>/sandboxes/<remote>/ssh_config` (directory `0700`, files `0600`, beside `known_hosts` and `sandbox.json`). Every ssh and mosh call for the remote passes it with `-F`, so your `~/.ssh/config` and `~/.ssh/known_hosts` are not used for it. Host keys the provider pins are checked strictly; without them the first key seen is trusted into the sandbox's own `known_hosts`. `host` is the alias `agentdeck-sb-<remote>`. |
+| `ssh_config` | string | Path of the sandbox's own ssh config, `<agent-deck data dir>/sandboxes/<remote>/ssh_config` (directory `0700`, files `0600`, beside `known_hosts` and `sandbox.json`). Every ssh and mosh call for the remote passes it with `-F`, so `~/.ssh/config`, `/etc/ssh/ssh_config` and `~/.ssh/known_hosts` are not used for it: `ProxyJump`, bastion or `ProxyCommand` settings there do not apply, and the provider must return a host and port that are reachable directly. Host keys the provider pins are checked strictly; without them the first key seen is trusted into the sandbox's own `known_hosts`. `host` is the alias `agentdeck-sb-<remote>`. |
+| `owner` | string | Who created the sandbox: `[sandbox] owner` (else `$USER`) when it was made, also sent to the provider as the `agent-deck/owner` label. `remote list` shows `owner: <name>` (and `"owner"` in `--json`), the TUI shows it on the sandbox's host row and preview, and the web fleet view on its card. `remote list --owner <name>` (or `--owner me`) lists only that person's sandboxes. Empty for sandboxes made before owners existed. |
+
+## [sandbox] Section
+
+Settings for the sandboxes this machine creates with a provider (`[providers.<name>]`, `remote add --provider`, `launch --provider`, the TUI's "new sandbox"). Not the Docker sandbox of the `[docker]` section.
+
+```toml
+[sandbox]
+owner = "alice"
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `owner` | string | `$USER` | The person who owns the sandboxes created here. Sent with every create request as the label `agent-deck/owner` (the docker example stores it as the container label `agent-deck.label.agent-deck/owner`) and kept on the remote as `owner`. At most 64 printable characters; anything else is refused before a sandbox is created. |
 
 ## [health] Section
 
@@ -1358,7 +1378,7 @@ status_events = false      # Status owners publish session.status and session.tu
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `plugins` | bool | `false` | Enables `limits --json` and `events publish` for `macapp.*` kinds other than the Mac app's own frames (`macapp.open`, `macapp.open.ack`, `macapp.browser.response`, `macapp.app.focus`, `macapp.ask.seen`); `macapp.ask` and `macapp.ask.ack` are never admitted (only `agent-deck ask` publishes them); `macapp.browser.request` also needs [`[browser] enabled`](#browser-section). Off by design: turning it on needs explicit consent, so `agent-deck config set macapp.plugins true` exits 2 with `CONSENT_REQUIRED` unless it gets `--yes` (or `-y`), or a `y` at the interactive prompt in a terminal. Turning it off needs no consent. While it is off, `limits` and `events publish` exit 2 and name the command to run: `agent-deck config set macapp.plugins true --yes`; under `--json` the error carries a `hint` object (`key`, `value`, `command`, `argv`, `consent`, `docs`) the Mac app can show before it runs `argv`. |
+| `plugins` | bool | `false` | Enables `limits --json` and `events publish` for `macapp.*` kinds other than the Mac app's own frames (`macapp.open`, `macapp.open.ack`, `macapp.switch`, `macapp.switch.ack`, `macapp.browser.response`, `macapp.app.focus`, `macapp.ask.seen`); `macapp.ask` and `macapp.ask.ack` are never admitted (only `agent-deck ask` publishes them); `macapp.browser.request` also needs [`[browser] enabled`](#browser-section). Off by design: turning it on needs explicit consent, so `agent-deck config set macapp.plugins true` exits 2 with `CONSENT_REQUIRED` unless it gets `--yes` (or `-y`), or a `y` at the interactive prompt in a terminal. Turning it off needs no consent. While it is off, `limits` and `events publish` exit 2 and name the command to run: `agent-deck config set macapp.plugins true --yes`; under `--json` the error carries a `hint` object (`key`, `value`, `command`, `argv`, `consent`, `docs`) the Mac app can show before it runs `argv`. |
 | `transcript_events` | bool | `false` | The notify daemon publishes a `session.transcript` frame whenever a live session's native transcript grows. Restart required. |
 | `status_events` | bool | `false` | Every status owner (TUI poller, notify daemon) publishes `session.status` and `session.turn` frames on each status transition. |
 
@@ -1400,6 +1420,21 @@ allow_sandboxed = false        # let sessions that run in a sandbox ask
 
 There is no key for the vault command: the vault is the fixed `/usr/local/bin/deck-secret`, which must be root-owned. These keys are guard rails an agent on the host can edit, not security boundaries.
 
+## [feedback] Section
+
+In-product feedback and problem reports (`agent-deck feedback`).
+
+```toml
+[feedback]
+disabled = false        # true stops the passive rating prompts
+agent_reports = false   # true lets agent sessions post with --from-agent
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `disabled` | bool | `false` | Suppresses the passive feedback rating prompts. Set when you answer `n`; `agent-deck feedback` asks to re-enable. |
+| `agent_reports` | bool | `false` | Lets agent sessions post public GitHub issues, "seen again" comments and "is it fixed" answers as this machine's `gh` account (`feedback bug|idea --from-agent`, `feedback fixed --from-agent`). Off means those refuse with `consent_required`; `--yes` does not stand in. A person turns it on with `agent-deck feedback agent-consent`, which shows where it posts, as which account and what is posted, then asks y/N; `--off` turns it off. |
+
 ## [tmux] Section
 
 How agent-deck drives tmux: which server its sessions live on, and which tmux options it sets on them.
@@ -1418,7 +1453,8 @@ options = { "history-limit" = "50000" }   # raw tmux options, applied after agen
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `socket_name` | string | `""` | tmux `-L <name>` selector for every agent-deck spawn. Empty shares the user's default server at `$TMUX_TMPDIR/tmux-<uid>/default`. Set it to isolate agent-deck onto its own tmux server, so its global option and key-binding writes never touch the user's interactive tmux, and a `tmux kill-server` in a shell cannot take managed sessions down. Captured per session at creation time — changing it later does **not** migrate existing sessions. CLI `--tmux-socket <name>` wins over this value. See "Socket Isolation" in the repo README.md. |
+| `socket_name` | string | `""` | tmux `-L <name>` selector for every agent-deck spawn. Empty shares the user's default server at `$TMUX_TMPDIR/tmux-<uid>/default`. Set it to isolate agent-deck onto its own tmux server, so its global option and key-binding writes never touch the user's interactive tmux, and a `tmux kill-server` in a shell cannot take managed sessions down. Captured per session at creation time — changing it later does **not** migrate existing sessions. CLI `--tmux-socket <name>` wins over this value. See "Socket Isolation" in docs/guide/sessions.md. |
+| `binaries` | table | — | tmux binary per `-L` socket name, e.g. `binaries = { deck36 = "/usr/local/opt/tmux-3.6/bin/tmux" }`. agent-deck runs that binary for every call on that socket (commands, new-session, attach, control pipes, the version probe that gates `indic_zero_width_marks`). Other sockets and the default server run `tmux` from PATH. A tmux client only talks to a server of its own version (a 3.4 client gets "server exited unexpectedly" from a 3.6a server), so this lets a newer tmux serve one socket while older servers keep running. Move a stopped session there with `agent-deck session set <id> tmux-socket <name>`, then start it. Name the file exactly `tmux`, in a directory of its own: that directory goes first on PATH in the socket's panes so a bare `tmux` there reaches the right server (config load warns otherwise). |
 | `mouse` | bool | `true` | `false` never sets tmux `mouse on`, so the terminal emulator keeps raw control of mouse events — required by the VS Code Linux integrated terminal for click-drag selection. Applies both at session creation and on the reconnect configuration pass. |
 | `inject_status_line` | bool | `true` | `false` leaves the tmux status bar alone, and also disables agent-deck's global tmux notification bar and key bindings, so the runtime stops mutating global tmux options. |
 | `clear_on_restart` | bool | `false` | `true` wipes the scrollback buffer on session restart (`respawn-pane`) instead of preserving the previous run's output. |
@@ -1531,7 +1567,9 @@ show_pool_status = true     # Show 🔌 indicator
 
 **Benefits:** 30 sessions x 5 MCPs = 150 processes -> 5 shared processes (90% memory savings).
 
-**Socket location:** `<data dir>/sockets/mcp-{name}.sock` (for example `~/.agent-deck/sockets/`), private to your user. Sockets under `/tmp/agentdeck-mcp-*.sock` from old versions are ignored.
+**Socket location:** `<data dir>/sockets/mcp-<name>-<id>.sock` (for example `~/.agent-deck/sockets/`), private to your user. `<id>` is a short digest of the MCP's `command`, `args` and `env`, so several config homes that pool the same name with a different definition (for example another token) each run their own process, and only an identical definition shares one. A long name is shortened to keep the path within the 104-byte unix socket limit. The log is `<data dir>/logs/mcppool/<name>-<id>_socket.log`.
+
+**Upgrading from a version with name-only sockets (`mcp-<name>.sock`):** sessions started before the upgrade keep that path in their MCP config. The pool also answers on `mcp-<name>.sock` while no other process does (the first definition of that name to start claims it), so those sessions reconnect without a restart. New sessions use the `mcp-<name>-<id>.sock` path. Restart an old session to move it to its own definition's socket. Sockets under `/tmp/agentdeck-mcp-*.sock` from old versions are ignored.
 
 ## [mcps.*] Section
 

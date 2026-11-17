@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
 
@@ -138,6 +140,10 @@ type UserConfig struct {
 	// Comms is the [comms] section: the one switch of the Comms Ledger
 	// (docs/comms.md). Off by default while the ledger is canaried.
 	Comms CommsSettings `toml:"comms,omitempty"`
+
+	// Trace is the [trace] section: agent activity tracing (ASK-129,
+	// internal/trace). Off by default; AGENTDECK_TRACE overrides it.
+	Trace TraceSettings `toml:"trace,omitempty"`
 
 	// MCPs defines available MCP servers for the MCP Manager
 	// These can be attached/detached per-project via the MCP Manager (M key)
@@ -274,6 +280,10 @@ type UserConfig struct {
 	// destroy sandboxes, which `remote add --provider` registers as remotes.
 	Providers map[string]ProviderConfig `toml:"providers,omitempty"`
 
+	// Sandbox holds settings for the sandboxes this machine creates with a
+	// provider ([sandbox]).
+	Sandbox SandboxSettings `toml:"sandbox,omitempty"`
+
 	// Remote holds settings for every remote attach ([remote]).
 	Remote RemoteAttachSettings `toml:"remote,omitempty"`
 
@@ -348,6 +358,24 @@ type UserConfig struct {
 	// Harnesses overrides the core install/login table per harness
 	// ([harnesses.<name>] binary, install_command, login_command, docs_url).
 	Harnesses map[string]harness.Override `toml:"harnesses,omitempty"`
+}
+
+// TraceSettings is the [trace] section.
+type TraceSettings struct {
+	// Level is off (default), metadata (ids, tool names, timings, status)
+	// or summaries (adds a short scrubbed shape summary per tool call).
+	Level string `toml:"level,omitempty"`
+}
+
+// TraceLevelSetting returns the configured [trace] level string ("" when
+// unset or the config is unreadable). The env override is applied by the
+// caller (trace.ResolveLevel).
+func TraceLevelSetting() string {
+	cfg, _ := LoadUserConfig()
+	if cfg == nil {
+		return ""
+	}
+	return cfg.Trace.Level
 }
 
 // CommsSettings is the [comms] section.
@@ -1131,6 +1159,13 @@ type FeedbackSettings struct {
 	// Disabled suppresses all passive feedback prompts when true.
 	// Defaults to false. Set by RecordOptOut paths; cleared on re-enable.
 	Disabled bool `toml:"disabled,omitempty"`
+
+	// AgentReports lets agent sessions file public GitHub issues and
+	// comments as this machine's gh account (`agent-deck feedback bug
+	// --from-agent`, `feedback fixed --from-agent`). Defaults to false:
+	// a person turns it on with `agent-deck feedback agent-consent`,
+	// which shows what is posted, where and as whom, and asks y/N.
+	AgentReports bool `toml:"agent_reports,omitempty"`
 }
 
 // TelemetrySettings configures opt-in usage telemetry (TELEMETRY.md).
@@ -1154,6 +1189,16 @@ type TelemetrySettings struct {
 
 	// Level is "full" (default) or "basic". Config can only lower the level.
 	Level string `toml:"level,omitempty"`
+
+	// OrgID is an opaque org id (a-z, 0-9, inner dashes, 3-40 chars, or a
+	// UUID) added as the "org" property to detailed events. A managed
+	// configuration's org_id wins over it. Default: none.
+	OrgID string `toml:"org_id,omitempty"`
+
+	// CrashDSN turns on crash and error reports to this Sentry DSN
+	// (https://<public key>@<host>/<project>). A managed configuration's
+	// crash_dsn wins over it. Default: none (crash reports off).
+	CrashDSN string `toml:"crash_dsn,omitempty"`
 }
 
 // OpenClawSettings configures the OpenClaw gateway connection.
@@ -1249,6 +1294,68 @@ type RemoteConfig struct {
 	// and mosh call for this remote passes it with -F. Empty uses the user's
 	// own ssh configuration.
 	SSHConfig string `toml:"ssh_config,omitempty"`
+
+	// Owner is the person who created this remote's sandbox, sent to the
+	// provider as the agent-deck/owner label ([sandbox] owner, else $USER).
+	// Empty for a plain SSH remote and for sandboxes made before owners.
+	Owner string `toml:"owner,omitempty"`
+}
+
+// SandboxSettings is the [sandbox] section: settings for the sandboxes
+// this machine creates with a provider.
+type SandboxSettings struct {
+	// Owner names the person who owns the sandboxes created here, e.g.
+	// "alice". It is sent to the provider as the agent-deck/owner label and
+	// shown on the sandbox's remote (remote list, TUI, web). Default: the
+	// login name ($USER). At most 64 printable characters.
+	Owner string `toml:"owner,omitempty"`
+}
+
+// Where SandboxOwnerSource found the owner, named for error messages.
+const (
+	OwnerSourceConfig = "[sandbox] owner"
+	OwnerSourceUser   = "$USER"
+	OwnerSourceLogin  = "the account's login name"
+)
+
+// SandboxOwner returns the owner for a new sandbox: [sandbox] owner, else
+// $USER, else the account's login name; "" when none is known.
+func (c *UserConfig) SandboxOwner() string {
+	owner, _ := c.SandboxOwnerSource()
+	return owner
+}
+
+// SandboxOwnerSource is SandboxOwner plus where the value came from
+// (OwnerSourceConfig, OwnerSourceUser or OwnerSourceLogin; "" with no
+// owner), so a refusal names the setting the user can actually change.
+func (c *UserConfig) SandboxOwnerSource() (owner, source string) {
+	if c != nil {
+		if owner := strings.TrimSpace(c.Sandbox.Owner); owner != "" {
+			return owner, OwnerSourceConfig
+		}
+	}
+	if owner := strings.TrimSpace(os.Getenv("USER")); owner != "" {
+		return owner, OwnerSourceUser
+	}
+	if u, err := user.Current(); err == nil {
+		if owner := strings.TrimSpace(u.Username); owner != "" {
+			return owner, OwnerSourceLogin
+		}
+	}
+	return "", ""
+}
+
+// PrintableOwner returns owner without its control and other
+// non-printable characters. An owner is free text from config.toml (a
+// hand-edited remote, [sandbox] owner) or the environment, so every view
+// that prints it to a terminal, a JSON client or the web goes through this.
+func PrintableOwner(owner string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) {
+			return r
+		}
+		return -1
+	}, owner)
 }
 
 // ProviderConfig defines one sandbox provider ([providers.<name>]).
@@ -1958,6 +2065,32 @@ type NotificationsConfig struct {
 	// on by default; this covers the operator, including TOP-LEVEL sessions with
 	// no parent, which the transition path cannot reach at all.
 	Desktop bool `toml:"desktop,omitempty"`
+
+	// Sort picks the order of the notification bar (and so which session each
+	// Ctrl+b 1-9 key jumps to). "waiting" (default) lists the session that
+	// started waiting most recently first. "last_accessed" lists the session
+	// you attached to most recently first, like Alt+Tab (#2949). Any other
+	// value falls back to "waiting".
+	Sort string `toml:"sort,omitempty"`
+}
+
+// Notification bar sort modes for [notifications] sort.
+const (
+	NotificationSortWaiting      = "waiting"
+	NotificationSortLastAccessed = "last_accessed"
+)
+
+// GetSort returns the normalized notification bar sort mode. Unknown or empty
+// values return NotificationSortWaiting so the default order never changes.
+func (n NotificationsConfig) GetSort() string {
+	return normalizeNotificationSort(n.Sort)
+}
+
+func normalizeNotificationSort(mode string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), NotificationSortLastAccessed) {
+		return NotificationSortLastAccessed
+	}
+	return NotificationSortWaiting
 }
 
 // GetDesktopEnabled reports whether desktop notifications are enabled.
@@ -3890,6 +4023,42 @@ type TmuxSettings struct {
 	// Precedence at Instance creation: CLI flag `--tmux-socket <name>`
 	// wins, else this config value, else empty.
 	SocketName string `toml:"socket_name,omitempty"`
+
+	// Binaries maps a tmux -L socket name to the tmux binary agent-deck runs
+	// for every call on that socket: commands, new-session, attach, control
+	// pipes and the version probe. Sockets not listed, and the default
+	// server, run the "tmux" on PATH. A tmux client only talks to a server
+	// of its own version, so this lets a newer tmux (e.g. 3.6 for
+	// indic_zero_width_marks) serve one socket while older servers keep
+	// running, without changing PATH. Move a session onto that socket with
+	// `agent-deck session set <id> tmux-socket <name>` while it is stopped.
+	// Example:
+	//   [tmux]
+	//   socket_name = "deck36"
+	//   [tmux.binaries]
+	//   deck36 = "/usr/local/opt/tmux-3.6/bin/tmux"
+	// Default: empty (every socket runs "tmux" from PATH).
+	Binaries map[string]string `toml:"binaries,omitempty"`
+}
+
+// misnamedTmuxBinarySockets returns, sorted, the [tmux.binaries] sockets
+// whose binary file is not named exactly "tmux". Such a binary still runs
+// agent-deck's own calls, but the socket's panes get its directory first on
+// PATH so that a bare "tmux" there (an agent, a hook) is the client that
+// matches the server; under another name that lookup finds the older tmux.
+func misnamedTmuxBinarySockets(binaries map[string]string) []string {
+	var out []string
+	for socket, bin := range binaries {
+		bin = strings.TrimSpace(bin)
+		if strings.TrimSpace(socket) == "" || bin == "" {
+			continue
+		}
+		if filepath.Base(bin) != "tmux" {
+			out = append(out, socket)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // GetInjectStatusLine returns whether to inject status line, defaulting to true.
@@ -4534,6 +4703,12 @@ func LoadUserConfig() (*UserConfig, error) {
 
 	normalizeUIHiddenTools(&config.UI, config.Tools)
 	normalizeUIPreviewFields(&config.UI)
+	for _, socket := range misnamedTmuxBinarySockets(config.Tmux.Binaries) {
+		registryLog.Warn("tmux.binaries entry is not named tmux",
+			"socket", socket,
+			"path", strings.TrimSpace(config.Tmux.Binaries[socket]),
+			"hint", "name the file exactly tmux, in a directory of its own: agent-deck puts that directory first on PATH in the socket's panes, so a bare tmux there reaches this server")
+	}
 
 	// Keep the in-group sort mode in lockstep with the loaded config. This is
 	// the single funnel for TUI, web, and CLI; ReloadUserConfig routes through
@@ -4822,6 +4997,20 @@ func IsCodexCompatible(toolName string) bool {
 	return false
 }
 
+// IsDevinCompatible returns true if the tool is "devin" or a custom tool
+// whose underlying command is "devin". Use this for capability gates where
+// custom tools wrapping Devin should inherit Devin's composer behavior
+// (e.g. its wider input-coalescing window — see preEnterDelayForTool).
+func IsDevinCompatible(toolName string) bool {
+	if toolName == "devin" {
+		return true
+	}
+	if def := GetToolDef(toolName); def != nil {
+		return strings.EqualFold(strings.TrimSpace(def.CompatibleWith), "devin") || isDevinCommand(def.Command)
+	}
+	return false
+}
+
 // isShellBinary returns true if cmd is a known interactive shell process name.
 // Used to distinguish "shell at a prompt" from "shell running a foreground command"
 // (e.g. "node" from "yarn dev", "java" from "mvn spring-boot:run").
@@ -4875,6 +5064,10 @@ func isClaudeCommand(command string) bool {
 
 func isCodexCommand(command string) bool {
 	return isCommand(command, "codex")
+}
+
+func isDevinCommand(command string) bool {
+	return isCommand(command, "devin")
 }
 
 func isCommand(command, wantBase string) bool {
@@ -5049,6 +5242,14 @@ func GetToolIcon(toolName string) string {
 func MergeToolPatterns(toolName string) *tmux.RawPatterns {
 	defaults := tmux.DefaultRawPatterns(toolName)
 	toolDef := GetToolDef(toolName)
+	// Keep in sync with patternOnlyOverride in toolregistry.go, which skips the shadow warning for these entries.
+	if toolDef == nil && defaults != nil {
+		if config, err := LoadUserConfig(); err == nil && config != nil {
+			if configured, ok := config.Tools[toolName]; ok {
+				toolDef = &configured
+			}
+		}
+	}
 
 	// No defaults and no config entry: nothing to do
 	if defaults == nil && toolDef == nil {

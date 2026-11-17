@@ -3,6 +3,7 @@
     {
       "account": "",
       "acknowledged": 0,
+      "acknowledged_at": 0,
       "archived_at": 0,
       "auto_name": 0,
       "auto_name_description": "",
@@ -33,6 +34,7 @@
     {
       "account": "",
       "acknowledged": 0,
+      "acknowledged_at": 0,
       "archived_at": 0,
       "auto_name": 0,
       "auto_name_description": "",
@@ -63,6 +65,7 @@
     {
       "account": "",
       "acknowledged": 0,
+      "acknowledged_at": 0,
       "archived_at": 0,
       "auto_name": 0,
       "auto_name_description": "",
@@ -93,6 +96,7 @@
     {
       "account": "",
       "acknowledged": 0,
+      "acknowledged_at": 0,
       "archived_at": 0,
       "auto_name": 0,
       "auto_name_description": "",
@@ -123,6 +127,7 @@
     {
       "account": "",
       "acknowledged": 0,
+      "acknowledged_at": 0,
       "archived_at": 0,
       "auto_name": 0,
       "auto_name_description": "",
@@ -153,6 +158,7 @@
     {
       "account": "",
       "acknowledged": 0,
+      "acknowledged_at": 0,
       "archived_at": 0,
       "auto_name": 0,
       "auto_name_description": "",
@@ -183,6 +189,7 @@
     {
       "account": "",
       "acknowledged": 0,
+      "acknowledged_at": 0,
       "archived_at": 0,
       "auto_name": 0,
       "auto_name_description": "",
@@ -204,7 +211,7 @@
       "tmux_session": "<TMUX_SESSION>",
       "tmux_socket_name": "",
       "tool": "shell",
-      "tool_data": "{\"last_started_at\":\"\u003cVOLATILE_LAST_STARTED_AT\u003e\"}",
+      "tool_data": "{\"last_started_at\":\"\u003cVOLATILE_LAST_STARTED_AT\u003e\",\"launch_tmux_session\":\"<TMUX_SESSION>\",\"launched_tool\":\"shell\"}",
       "worktree_branch": "",
       "worktree_path": "",
       "worktree_repo": "",

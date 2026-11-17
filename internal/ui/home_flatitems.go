@@ -759,7 +759,8 @@ func (h *Home) rebuildFlatItemsAt(now time.Time) {
 			// active view, empty remote groups get a header row too, like an
 			// empty local group; any filter or the archived view hides them.
 			showEmptyGroups := !viewArchived && h.timeFilter == session.TimeFilterAll && h.statusFilter == ""
-			rows := buildRemoteFlatItemsWithEmptyGroups(remoteName, sessions, collapsed, h.remoteSessionOrder.forRemote(remoteName), remoteGroupLists[remoteName], showEmptyGroups)
+			// #2947: "Active on top" splits each remote's own section too.
+			rows := buildRemoteFlatItemsForViewMode(remoteName, sessions, collapsed, h.remoteSessionOrder.forRemote(remoteName), remoteGroupLists[remoteName], showEmptyGroups, h.groupViewMode, h.viewModeOpts)
 			for _, row := range rows {
 				// An empty group's header has no session to count; give it
 				// a zero entry so the renderer never falls back to a scan.
@@ -883,6 +884,7 @@ func (h *Home) sidebarLineBudget() (lineBudget int, sidebarWidth int) {
 	if h.maintenanceMsg != "" {
 		maintenanceBannerHeight = 1
 	}
+	maintenanceBannerHeight += h.sandboxStatusHeight() // sandbox status lines sit with the banners
 	debugBarHeight := 0
 	if h.debugMode {
 		debugBarHeight = 1
@@ -890,7 +892,7 @@ func (h *Home) sidebarLineBudget() (lineBudget int, sidebarWidth int) {
 
 	// contentHeight = total height for main content area
 	// MUST match View(): subtract debugBarHeight when the debug footer is rendered.
-	contentHeight := h.height - 1 - helpBarHeight - updateBannerHeight - maintenanceBannerHeight - filterBarHeight - debugBarHeight - h.promptInputDialog.ReservedHeight()
+	contentHeight := h.height - 1 - helpBarHeight - updateBannerHeight - maintenanceBannerHeight - filterBarHeight - debugBarHeight - h.promptInputDialog.ReservedHeight() - h.hintBarHeight()
 
 	// CRITICAL: Calculate panelContentHeight based on current layout mode
 	// This MUST match the calculations in renderStackedLayout/renderDualColumnLayout/renderSingleColumnLayout
@@ -990,12 +992,13 @@ func (h *Home) getVisibleHeight() int {
 	if h.maintenanceMsg != "" {
 		maintenanceBannerHeight = 1
 	}
+	maintenanceBannerHeight += h.sandboxStatusHeight() // sandbox status lines sit with the banners
 	debugBarHeight := 0
 	if h.debugMode {
 		debugBarHeight = 1
 	}
 
-	contentHeight := h.height - 1 - helpBarHeight - updateBannerHeight - maintenanceBannerHeight - filterBarHeight - debugBarHeight - h.promptInputDialog.ReservedHeight()
+	contentHeight := h.height - 1 - helpBarHeight - updateBannerHeight - maintenanceBannerHeight - filterBarHeight - debugBarHeight - h.promptInputDialog.ReservedHeight() - h.hintBarHeight()
 
 	var panelContentHeight int
 	layoutMode := h.getLayoutMode()

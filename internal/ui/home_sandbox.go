@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -18,9 +19,15 @@ import (
 // wait, install). Provision rolls the sandbox back on its own when it fails.
 const sandboxProvisionTimeout = 15 * time.Minute
 
+// sandboxQuitWait bounds how long quitting waits for a cancelled
+// provisioning to roll back (the provider package bounds a rollback at 2
+// minutes).
+const sandboxQuitWait = 150 * time.Second
+
 // sandboxProgressMsg carries one provisioning progress line; events is
 // read again for the next line or the final sandboxProvisionedMsg.
 type sandboxProgressMsg struct {
+	op       uint64
 	provider string
 	line     string
 	events   <-chan tea.Msg
@@ -28,6 +35,7 @@ type sandboxProgressMsg struct {
 
 // sandboxProvisionedMsg reports the end of a TUI-driven provisioning.
 type sandboxProvisionedMsg struct {
+	op         uint64
 	provider   string
 	remoteName string
 	opts       session.RemoteAddOptions
@@ -35,10 +43,13 @@ type sandboxProvisionedMsg struct {
 }
 
 // remoteHostLabel is what the TUI shows as a remote's host: the sandbox
-// kind for a provider remote (its ssh alias means nothing to the user),
-// otherwise the configured host.
+// kind and owner for a provider remote (its ssh alias means nothing to the
+// user), otherwise the configured host.
 func remoteHostLabel(rc session.RemoteConfig) string {
 	if kind := provider.DisplayKind(rc); kind != "" {
+		if owner := session.PrintableOwner(rc.Owner); owner != "" {
+			return kind + " · owner: " + owner
+		}
 		return kind
 	}
 	return rc.Host
@@ -60,13 +71,16 @@ func newDialogWhereChoicesFromConfig() []whereChoice {
 // dialog opened on a remote row; a sandbox is provisioned first, off the UI
 // loop, and the session is created on it when that succeeds.
 func (h *Home) submitNewDialogWhere(where whereChoice) tea.Cmd {
-	opts := h.newDialog.GetWhereRemoteCreateOptions()
+	opts, optsErr := h.newDialog.GetWhereRemoteCreateOptions()
+	if optsErr != "" {
+		h.newDialog.SetError(optsErr)
+		return nil
+	}
 	h.newDialog.Hide()
 	h.clearError()
 	if where.kind == whereRemote {
 		return h.remoteCreateFunc()(where.name, opts)
 	}
-	h.setError(fmt.Errorf("new sandbox (%s): provisioning", where.name))
 	return h.provisionSandboxCmd(where.name, opts)
 }
 
@@ -92,8 +106,10 @@ func (h *Home) provisionSandboxCmd(providerName string, opts session.RemoteAddOp
 		baseCtx = context.Background()
 	}
 	profile := h.profile
+	op := h.startSandboxOp(fmt.Sprintf("new sandbox (%s)", providerName), "starting...")
 	events := make(chan tea.Msg, 16)
 	run := func() tea.Msg {
+		defer h.beginSandboxProvision()()
 		ctx, cancel := context.WithTimeout(baseCtx, sandboxProvisionTimeout)
 		defer cancel()
 		res, err := provision(ctx, provider.ProvisionOptions{
@@ -103,10 +119,10 @@ func (h *Home) provisionSandboxCmd(providerName string, opts session.RemoteAddOp
 				if len(events) >= cap(events)-1 {
 					return
 				}
-				events <- sandboxProgressMsg{provider: providerName, line: line, events: events}
+				events <- sandboxProgressMsg{op: op, provider: providerName, line: line, events: events}
 			},
 		})
-		msg := sandboxProvisionedMsg{provider: providerName, opts: opts, err: err}
+		msg := sandboxProvisionedMsg{op: op, provider: providerName, opts: opts, err: err}
 		if err == nil && res != nil {
 			msg.remoteName = res.RemoteName
 		} else if err == nil {
@@ -118,14 +134,53 @@ func (h *Home) provisionSandboxCmd(providerName string, opts session.RemoteAddOp
 	return tea.Batch(run, waitSandboxEvent(events))
 }
 
+// beginSandboxProvision counts one provisioning in flight and returns its
+// end.
+func (h *Home) beginSandboxProvision() func() {
+	h.sandboxProvisionMu.Lock()
+	if h.sandboxProvisionN == 0 {
+		h.sandboxProvisionIdle = make(chan struct{})
+	}
+	h.sandboxProvisionN++
+	h.sandboxProvisionMu.Unlock()
+	return sync.OnceFunc(func() {
+		h.sandboxProvisionMu.Lock()
+		h.sandboxProvisionN--
+		if h.sandboxProvisionN == 0 {
+			close(h.sandboxProvisionIdle)
+		}
+		h.sandboxProvisionMu.Unlock()
+	})
+}
+
+// waitSandboxProvisions waits, at most timeout, until no sandbox
+// provisioning is in flight; false when it gave up.
+func (h *Home) waitSandboxProvisions(timeout time.Duration) bool {
+	h.sandboxProvisionMu.Lock()
+	idle := h.sandboxProvisionIdle
+	busy := h.sandboxProvisionN > 0
+	h.sandboxProvisionMu.Unlock()
+	if !busy {
+		return true
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-idle:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
 func waitSandboxEvent(events <-chan tea.Msg) tea.Cmd {
 	return func() tea.Msg { return <-events }
 }
 
-// handleSandboxProgress shows the line in the footer and waits for the next
-// event.
+// handleSandboxProgress shows the line in the sandbox status line and
+// waits for the next event.
 func (h *Home) handleSandboxProgress(msg sandboxProgressMsg) tea.Cmd {
-	h.setError(fmt.Errorf("new sandbox (%s): %s", msg.provider, msg.line))
+	h.setSandboxOpStep(msg.op, msg.line)
 	return waitSandboxEvent(msg.events)
 }
 
@@ -133,9 +188,12 @@ func (h *Home) handleSandboxProgress(msg sandboxProgressMsg) tea.Cmd {
 // or shows why provisioning failed (nothing is created then).
 func (h *Home) handleSandboxProvisioned(msg sandboxProvisionedMsg) tea.Cmd {
 	if msg.err != nil {
+		step := h.endSandboxOp(msg.op, "")
 		h.setError(fmt.Errorf("new sandbox (%s) failed: %w", msg.provider, msg.err))
+		h.confirmDialog.ShowNotice("⚠  New Sandbox Failed", sandboxProvisionFailedNotice(msg.provider, step, msg.err))
 		return nil
 	}
+	h.endSandboxOp(msg.op, fmt.Sprintf("new sandbox (%s) is ready as remote %s; creating the session there", msg.provider, msg.remoteName))
 	h.clearError()
 	uiLog.Info("sandbox_provisioned", slog.String("provider", msg.provider), slog.String("remote", msg.remoteName))
 	return h.remoteCreateFunc()(msg.remoteName, msg.opts)
@@ -144,8 +202,7 @@ func (h *Home) handleSandboxProvisioned(msg sandboxProvisionedMsg) tea.Cmd {
 // defaultSandboxProvisioner is provider.Provision with the remote-add
 // install step: keep a working agent-deck, otherwise deploy this build.
 func defaultSandboxProvisioner(ctx context.Context, opts provider.ProvisionOptions) (*provider.Provisioned, error) {
-	opts.Install = installOnSandbox
-	return provider.Provision(ctx, opts)
+	return provider.Provision(ctx, withInstallProgress(opts, installOnSandbox))
 }
 
 func installOnSandbox(ctx context.Context, name string, rc session.RemoteConfig) error {

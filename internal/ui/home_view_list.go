@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/asheshgoplani/agent-deck/internal/provider"
 	"github.com/asheshgoplani/agent-deck/internal/session"
 )
 
@@ -284,7 +285,7 @@ func (h *Home) renderItem(
 	case session.ItemTypeWindow:
 		h.renderWindowItem(b, item, selected)
 	case session.ItemTypeRemoteGroup:
-		h.renderRemoteGroupItem(b, item, selected, listWidth)
+		h.renderRemoteGroupItemSuffix(b, item, selected, listWidth, h.remoteRepeatSuffix(item, itemIndex))
 	case session.ItemTypeRemoteSession:
 		h.renderRemoteSessionItemAtWidth(b, item, selected, listWidth)
 	case session.ItemTypeDivider:
@@ -384,6 +385,11 @@ func (h *Home) renderGroupItem(
 		nameStyle = nameStyle.Foreground(lipgloss.Color(stats.tint))
 	}
 	countStr := countStyle.Render(fmt.Sprintf(" (%d)", stats.sessionCount))
+	// A collapsed group hides the row holding the voice mic: say so on the
+	// header (voice_badge.go). An expanded group's row already shows it.
+	if !group.Expanded && h.voiceInLocalGroup(group.Path) {
+		countStr += h.voiceGroupMarker(selected)
+	}
 	if h.compactEmbeddedSidebar() {
 		prefix := ""
 		if selected {
@@ -622,7 +628,29 @@ func remoteRowGutter(selected bool) string {
 }
 
 // renderRemoteGroupItem renders a remote group header (e.g., "remotes/dev")
+// remoteRepeatSuffix is the " (idle)" / " (stopped)" suffix for a remote group
+// header that "Active on top" repeats below the divider (#2947), matching
+// what a repeated local header gets in renderGroupItem.
+func (h *Home) remoteRepeatSuffix(item session.Item, itemIndex int) string {
+	if h.groupViewMode != session.GroupViewActiveTop || item.Level == 0 {
+		return ""
+	}
+	for i := 0; i < itemIndex && i < len(h.flatItems); i++ {
+		it := h.flatItems[i]
+		if it.Type == session.ItemTypeRemoteGroup && it.RemoteName == item.RemoteName && it.Path == item.Path {
+			return " (" + h.viewModeOpts.ActiveTopBottomLabel() + ")"
+		}
+	}
+	return ""
+}
+
 func (h *Home) renderRemoteGroupItem(b *strings.Builder, item session.Item, selected bool, listWidth int) {
+	h.renderRemoteGroupItemSuffix(b, item, selected, listWidth, "")
+}
+
+// renderRemoteGroupItemSuffix is renderRemoteGroupItem with nameSuffix added
+// after a sub-group's name.
+func (h *Home) renderRemoteGroupItemSuffix(b *strings.Builder, item session.Item, selected bool, listWidth int, nameSuffix string) {
 	nameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true) // yellow
 	countStyle := DimStyle
 	expandIcon := "▾"
@@ -649,13 +677,18 @@ func (h *Home) renderRemoteGroupItem(b *strings.Builder, item session.Item, sele
 		if idx := strings.LastIndex(groupPath, "/"); idx >= 0 {
 			segName = groupPath[idx+1:]
 		}
+		voiceMarker := ""
+		if h.isRemoteGroupCollapsed(item.Path) && h.voiceInRemoteGroup(item.RemoteName, groupPath) {
+			voiceMarker = h.voiceGroupMarker(selected)
+		}
 
-		line := fmt.Sprintf("%s%s%s %s%s%s",
+		line := fmt.Sprintf("%s%s%s %s%s%s%s",
 			remoteRowGutter(selected),        // align with group hotkey gutter
 			strings.Repeat("  ", item.Level), // nest under the remote header
 			expandIcon,
-			nameStyle.Render(segName),
+			nameStyle.Render(segName+nameSuffix),
 			countStyle.Render(fmt.Sprintf(" (%d)", counts.total)),
+			voiceMarker,
 			remoteStatusSuffix(counts.running, counts.waiting, stale),
 		)
 		b.WriteString(truncateRemoteGroupLine(line, listWidth))
@@ -675,7 +708,18 @@ func (h *Home) renderRemoteGroupItem(b *strings.Builder, item session.Item, sele
 	versionState := h.remoteVersions[item.RemoteName]
 	poll, hasPoll := h.remotePolls[item.RemoteName]
 	pollActive := h.remotePollActive[item.RemoteName]
+	rc := h.remotePollConfig[item.RemoteName]
 	h.remoteSessionsMu.RUnlock()
+	kindMarker := ""
+	if kind := provider.DisplayKind(rc); kind != "" {
+		// A sandbox's host is an ssh alias that means nothing to the
+		// user; say whose it is and what it is instead. The owner goes
+		// first so a narrow list, which cuts the row, still shows it.
+		if owner := session.PrintableOwner(rc.Owner); owner != "" {
+			kind = "owner: " + owner + " · " + kind
+		}
+		kindMarker = countStyle.Render(" · " + kind)
+	}
 
 	trailer := h.renderRemoteLatencyMarker(item.RemoteName, selected)
 	if hasPoll && poll.LastPollError != "" {
@@ -708,11 +752,19 @@ func (h *Home) renderRemoteGroupItem(b *strings.Builder, item session.Item, sele
 		trailer += " " + DimStyle.Render("(R retry)")
 	}
 
-	line := fmt.Sprintf("%s%s %s%s%s%s%s",
+	// A collapsed remote header hides the row holding the voice mic.
+	voiceMarker := ""
+	if h.isRemoteGroupCollapsed(item.Path) && h.voiceInRemoteGroup(item.RemoteName, "") {
+		voiceMarker = h.voiceGroupMarker(selected)
+	}
+
+	line := fmt.Sprintf("%s%s %s%s%s%s%s%s%s",
 		remoteRowGutter(selected), // align with group hotkey gutter (flush with local root groups)
 		expandIcon,
 		nameStyle.Render("remotes/"+item.RemoteName),
 		countStyle.Render(fmt.Sprintf(" (%d)", counts.total)),
+		voiceMarker,
+		kindMarker,
 		renderRemoteVersionMarker(versionState, Version, selected), // #2164: drift marker, e.g. " v1.15.0 ↑"
 		remoteStatusSuffix(counts.running, counts.waiting, stale),
 		trailer,
@@ -968,12 +1020,29 @@ func (h *Home) renderRemoteSessionItemAtWidth(b *strings.Builder, item session.I
 	remoteViewers, remoteViewersKnown := rs.ViewerList()
 	remoteViewersBadge := renderViewersBadge(remoteViewers, remoteViewersKnown, selected)
 
-	b.WriteString(fmt.Sprintf("%s%s%s %s %s%s%s%s\n",
+	// 🎙 voice badge right after the title when this remote row holds the
+	// mic (voice_badge.go). It is fitted before the tool, viewers and
+	// pending badges, so on a narrow list it is the last to go: the words
+	// when the whole row still fits, else the glyph, which only the title
+	// outranks.
+	voiceBadgeText := ""
+	if voiceSt := h.voiceForRemote(item.RemoteName, rs.ID); voiceSt != nil {
+		budget, wordsBudget := -1, -1
+		if listWidth > 0 {
+			head := cellWidth(remoteRowGutter(selected) + indent + treeConnector + " " + statusIcon + " " + titleStr)
+			budget = max(0, listWidth-head-1)
+			wordsBudget = max(0, budget-cellWidth(toolStr)-cellWidth(remoteViewersBadge)-cellWidth(pendingStr))
+		}
+		voiceBadgeText, _ = fitVoiceBadge(voiceSt, selected, budget, wordsBudget, h.voiceClock())
+	}
+
+	b.WriteString(fmt.Sprintf("%s%s%s %s %s%s%s%s%s\n",
 		remoteRowGutter(selected), // align with group/session hotkey gutter
 		indent,
 		DimStyle.Render(treeConnector),
 		sStyle.Render(statusIcon),
 		titleStyle.Render(titleStr),
+		voiceBadgeText,
 		toolStr,
 		remoteViewersBadge,
 		pendingStr,

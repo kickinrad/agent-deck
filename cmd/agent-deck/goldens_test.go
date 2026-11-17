@@ -25,6 +25,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/asheshgoplani/agent-deck/internal/testutil"
 	"github.com/asheshgoplani/agent-deck/internal/triggers"
 )
 
@@ -81,6 +82,10 @@ var excludedCommands = []excludedCommand{
 	{"telegram-doctor", "contacts the Telegram API (network)"},
 	{"feedback", "sends telemetry/feedback to a remote endpoint"},
 	{"debug-dump", "captures live PIDs/goroutine state into a ring-buffer dump; not byte-stable by design"},
+	{"connect hermes", "creates (or rotates) an assistant token in the store; `connect <assistant>` for every kind is covered by internal/assistant tests"},
+	{"connect serve", "long-running MCP stdio server; covered by internal/assistant round-trip tests"},
+	{"connect test", "spawns `connect serve` (or calls a live web server)"},
+	{"connect revoke", "mutates the assistant token store"},
 	{"recall", "unbounded scan of real Claude conversation transcripts on the host, outside the sandbox"},
 	{"session context", "walks the real host CLAUDE.md/AGENTS.md memory hierarchy outside the sandbox (see session_context_golden_test.go)"},
 	{"session start", "starts a real tmux process; covered instead by the storage-bytes goldens (deliverable 2)"},
@@ -243,6 +248,11 @@ func safeSpecs() []goldenSpec {
 		{"triggers_all_json", []string{"-p", goldensProfile, "triggers", "--all", "--json"}, 0},
 		{"triggers_fires_json", []string{"-p", goldensProfile, "triggers", "fires", "systemd:agentdeck-overnight", "--json"}, 0},
 
+		// A fresh sandbox has no assistant tokens and no audit log.
+		{"connect_list", []string{"connect", "list"}, 0},
+		{"connect_list_json", []string{"connect", "list", "--json"}, 0},
+		{"connect_audit_json", []string{"connect", "audit", "--json"}, 0},
+
 		{"completion_bash", []string{"completion", "bash"}, 0},
 		{"completion_zsh", []string{"completion", "zsh"}, 0},
 		{"completion_fish", []string{"completion", "fish"}, 0},
@@ -262,9 +272,9 @@ func helpSpecs() []goldenSpec {
 		"hermes-hooks", "cursor-hooks", "tmux-hooks", "pi-hooks", "deepseek", "group",
 		"worktree", "usage", "recall", "web", "remote", "conductor", "agents", "agent",
 		"telegram-doctor", "profile", "update", "telemetry", "debug-dump", "migrate-paths",
-		"uninstall", "completion", "costs", "config", "inbox", "feedback",
+		"uninstall", "completion", "costs", "config", "inbox", "feedback", "whats-new",
 		"watcher", "openclaw", "system", "mcp-proxy", "hooks", "hook-handler", "codex-notify",
-		"notify-daemon", "run-task", "open", "file", "browser", "triggers",
+		"notify-daemon", "run-task", "open", "switch", "file", "browser", "triggers", "connect",
 	}
 
 	subcommands := []string{
@@ -287,6 +297,7 @@ func helpSpecs() []goldenSpec {
 		"remote rename", "remote update",
 		"worktree list", "worktree info", "worktree cleanup",
 		"config show",
+		"feedback mine", "feedback fixed", "feedback agent-consent",
 		"profile list", "profile create", "profile delete", "profile default",
 		"inbox drain", "inbox export", "inbox writer-status", "inbox dead-letter",
 		"inbox dead-letter list", "inbox dead-letter show", "inbox dead-letter retry", "inbox dead-letter purge",
@@ -302,6 +313,7 @@ func helpSpecs() []goldenSpec {
 		"usage statusline", "recall timeline", "recall follow",
 		"events follow", "events publish",
 		"triggers list", "triggers scan", "triggers mute", "triggers unmute", "triggers run", "triggers fires",
+		"connect list", "connect revoke", "connect audit", "connect serve", "connect test",
 	}
 
 	all := append(append([]string{}, topLevel...), subcommands...)
@@ -401,6 +413,9 @@ var (
 
 func goldensBinary(t *testing.T) string {
 	t.Helper()
+	// Skip before the Once: a skip inside it would leave it done with no
+	// binary linked for the next caller.
+	testutil.SkipShort(t, "runs the real agent-deck binary end to end")
 	goldensBinOnce.Do(func() {
 		dir, err := os.MkdirTemp("", "ad-goldens-bin-")
 		if err != nil {
@@ -452,6 +467,9 @@ func (b *buildFailure) Error() string { return b.err.Error() + "\n" + b.output }
 // env slice to run the binary with.
 func goldensSandbox(t *testing.T) (home string, env []string) {
 	t.Helper()
+	// The goldens record what the binary reports against a private, known-empty
+	// tmux server, so they need the tmux binary (absent in some distro build sandboxes).
+	testutil.RequireTmux(t)
 	home = t.TempDir()
 
 	t.Setenv("HOME", home)
@@ -467,7 +485,41 @@ func goldensSandbox(t *testing.T) (home string, env []string) {
 
 	env = os.Environ()
 	env = hermeticGoldensTmux(t, env)
+	env = hermeticGoldensPi(t, env, home)
 	return home, env
+}
+
+// hermeticGoldensPi puts a fake `pi` that prints 1.3.0 where `pi-hooks status`
+// finds it first. Status runs `pi --version` through PiStatusEnv, which puts
+// the spawn-path directories missing from PATH ahead of PATH (on macOS that
+// includes /opt/homebrew/bin), so a fake that is only first on PATH can still
+// lose to a host pi. The fake lives in the sandbox's ~/.local/bin, the first
+// of those directories, and stays off PATH so the prelude always puts it in
+// front. Without it the golden carries whatever pi the host has (a different
+// version, or none), and a machine with pi installed fails a golden that CI,
+// without it, passes.
+func hermeticGoldensPi(t *testing.T, env []string, home string) []string {
+	t.Helper()
+	bin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatalf("creating the goldens bin directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "pi"), []byte("#!/bin/sh\necho 1.3.0\n"), 0o755); err != nil {
+		t.Fatalf("writing the fake pi: %v", err)
+	}
+	path := ""
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			path = v
+		}
+	}
+	var kept []string
+	for _, dir := range filepath.SplitList(path) {
+		if filepath.Clean(dir) != bin {
+			kept = append(kept, dir)
+		}
+	}
+	return append(filterEnv(env, "PATH"), "PATH="+strings.Join(kept, string(os.PathListSeparator)))
 }
 
 // hermeticGoldensTmux points the subprocess at a private TMUX_TMPDIR whose

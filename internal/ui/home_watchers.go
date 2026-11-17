@@ -15,13 +15,7 @@ import (
 
 // Init initializes the model
 func (h *Home) Init() tea.Cmd {
-	// Check for first run (no config.toml exists)
-	configPath, _ := session.GetUserConfigPath()
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		h.setupWizard.SetReportKey(h.actionKey(hotkeyReportProblem))
-		h.setupWizard.Show()
-		h.setupWizard.SetSize(h.width, h.height)
-	}
+	h.showSetupWizardIfFirstRun()
 
 	// Start system stats collection
 	if h.sshCollector != nil {
@@ -56,7 +50,6 @@ func (h *Home) Init() tea.Cmd {
 		h.tick(),
 		h.reviverTick(),
 		h.triggersPollCmd(), // ⚡ badges and the Triggers panel (triggers_live.go)
-		h.requestUpdateCheck(time.Now()),
 		h.fetchRemoteSessions,
 		h.waitRemoteChange,
 		// Opt-in telemetry upload check, now and hourly. MaybeUpload re-reads
@@ -64,6 +57,13 @@ func (h *Home) Init() tea.Cmd {
 		// no-op for everyone who has not said yes.
 		telemetryUploadCmd(),
 		telemetryUploadTick(),
+	}
+
+	// The startup check goes through the same gate as the periodic one:
+	// [updates].check_enabled = false and a suppressed process (issue #2251)
+	// mean the TUI does not ask GitHub on its own — not even once.
+	if cmd := h.periodicUpdateCheck(time.Now()); cmd != nil {
+		cmds = append(cmds, cmd)
 	}
 
 	// Start listening for storage changes
@@ -74,6 +74,11 @@ func (h *Home) Init() tea.Cmd {
 	// Start listening for OS theme changes
 	if h.themeWatcher != nil {
 		cmds = append(cmds, listenForThemeChange(h.themeWatcher))
+	}
+
+	// "What's new" on the first start after an update (whats_new_dialog.go).
+	if !whatsNewStartupSkipped() && Version != "0.0.0" {
+		cmds = append(cmds, h.whatsNewStartupCmd())
 	}
 
 	// Join the profile's watcher engine election (#2530): this TUI runs the
@@ -327,5 +332,19 @@ func (h *Home) refreshWatcherPanel() {
 			}
 			h.watcherPanel.SetEvents(displayEvents)
 		}
+	}
+}
+
+// showSetupWizardIfFirstRun opens the setup wizard when there is no
+// config.toml. On a fresh install with no sessions the first session load
+// swaps it for the Welcome (maybeStartOnboarding). Once the Welcome has been
+// shown it stands for first run, so the wizard does not follow it on a later
+// start (the user may have quit before dismissing it).
+func (h *Home) showSetupWizardIfFirstRun() {
+	configPath, _ := session.GetUserConfigPath()
+	if _, err := os.Stat(configPath); os.IsNotExist(err) && !onboardingMarkerExists() {
+		h.setupWizard.SetReportKey(h.actionKey(hotkeyReportProblem))
+		h.setupWizard.Show()
+		h.setupWizard.SetSize(h.width, h.height)
 	}
 }

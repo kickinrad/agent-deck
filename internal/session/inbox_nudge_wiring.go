@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
-	"strings"
 	"time"
 )
 
@@ -47,17 +46,20 @@ type wakeNudgeWiring struct {
 	now    func() time.Time
 	isIdle func(target *Instance, targetKind string) bool
 	send   func(parent *Instance, profile, message string) error
+	// legs counts the pi doorbells this wiring's dispatch has in flight.
+	legs legTracker
 }
 
 // defaultWakeNudgeWiring is the production wiring: a debounced nudger, the wall
 // clock, the parent idle probe, and a best-effort non-blocking pane send.
 func defaultWakeNudgeWiring() *wakeNudgeWiring {
-	return &wakeNudgeWiring{
+	w := &wakeNudgeWiring{
 		nudger: NewWakeNudger(defaultWakeNudgeDebounce),
 		now:    time.Now,
 		isIdle: parentIsNudgeableIdle,
-		send:   sendWakeNudge,
 	}
+	w.send = w.dispatch
+	return w
 }
 
 // nudge runs one debounced, idle-gated wake send of message to parent through
@@ -84,14 +86,15 @@ func (w *wakeNudgeWiring) nudge(parent *Instance, targetKind, profile, message s
 // result: a nil wiring, a busy parent, or a send error are all
 // swallowed (the durable record still drains on the next turn/heartbeat). A
 // panic in the injected probe/send is recovered so a wake bug can never take
-// down the producer.
-func (n *TransitionNotifier) fireWakeNudge(parent *Instance, event TransitionNotificationEvent) {
+// down the producer. It reports whether a wake line was actually sent.
+func (n *TransitionNotifier) fireWakeNudge(parent *Instance, event TransitionNotificationEvent) (woke bool) {
 	w := n.wake
 	if w == nil || w.nudger == nil || parent == nil {
-		return
+		return false
 	}
 	defer func() {
 		if r := recover(); r != nil {
+			woke = false
 			commsLog.Warn("wake_nudge_panic_recovered",
 				slog.String("parent", parent.ID), slog.Any("panic", r))
 		}
@@ -110,13 +113,15 @@ func (n *TransitionNotifier) fireWakeNudge(parent *Instance, event TransitionNot
 		// the operator can see WHY a pane wasn't woken without it being an error.
 		commsLog.Warn("wake_nudge_send_failed",
 			slog.String("parent", parent.ID), slog.String("error", err.Error()))
-		return
+		return false
 	}
-	if sent {
+	if sent && !ridesPiSocket(parent) {
 		// Comms Ledger measurement: one wake record per machine wake, so
-		// `msg stats` compares this path with the ledger's own.
+		// `msg stats` compares this path with the ledger's own. A pi parent's
+		// record comes from the send leg, with the outcome it saw.
 		SpoolCommsWake(parent.ID, "inbox", "tmux", line, "")
 	}
+	return sent
 }
 
 // errWakeNotReserved is a reserved wake's send step finding nothing left to
@@ -130,13 +135,15 @@ var errWakeNotReserved = errors.New("wake not reserved")
 // acknowledgement that is safe to treat as delivery, so neither the daemon's
 // idle reconciliation nor a restarted daemon wakes the parent for those
 // records again. A busy or debounced nudge marks nothing, so the records stay
-// retryable.
-func (n *TransitionNotifier) fireReservedWakeNudge(parent *Instance, event TransitionNotificationEvent, wakes func(TransitionNotificationEvent) bool) {
+// retryable. It reports whether a wake line was actually sent.
+func (n *TransitionNotifier) fireReservedWakeNudge(parent *Instance, event TransitionNotificationEvent, wakes func(TransitionNotificationEvent) bool) bool {
 	w := n.wake
 	if w == nil || parent == nil {
-		return
+		return false
 	}
-	reserving := *w
+	// The copy leaves legs behind: w.send still dispatches through w and its
+	// own leg tracker.
+	reserving := wakeNudgeWiring{nudger: w.nudger, now: w.now, isIdle: w.isIdle}
 	reserving.send = func(target *Instance, profile, message string) error {
 		reserved, err := reserveInboxWake(target.ID, wakes)
 		if err != nil {
@@ -150,13 +157,14 @@ func (n *TransitionNotifier) fireReservedWakeNudge(parent *Instance, event Trans
 		}
 		return w.send(target, profile, message)
 	}
-	(&TransitionNotifier{wake: &reserving}).fireWakeNudge(parent, event)
+	return (&TransitionNotifier{wake: &reserving}).fireWakeNudge(parent, event)
 }
 
 // parentIsNudgeableIdle reports whether parent is safe to wake with a send-keys
-// nudge: it must be a wake target for the record (see isWakeTarget) AND
-// currently idle/waiting, NOT mid-turn. A "reply" target (comms redesign PR5)
-// is the session whose tagged send the child just answered (a sibling sender, or the child's own
+// nudge: it must be a wake target (a conductor, or a Claude parent that opted
+// in with [inbox] wake_parents; see isWakeTarget) AND currently idle/waiting,
+// NOT mid-turn. A "reply" target (comms redesign PR5) is the session whose
+// tagged send the child just answered (a sibling sender, or the child's own
 // parent when it asked; see parentWakeEvent): it asked, so it is woken
 // whatever its title, but only when it is Claude-compatible (its prompt-time
 // drain injects the reply). A send-keys into a RUNNING pane only queues the
@@ -185,18 +193,28 @@ func parentIsNudgeableIdle(parent *Instance, targetKind string) bool {
 	}
 }
 
+// inboxWakeKindDigest is the wake kind of the info digest (issue #2469). It
+// wakes only a conductor: [inbox] wake_parents covers urgent records, not
+// the digest, so an opted-in ordinary session is never woken for info.
+const inboxWakeKindDigest = "digest"
+
 // isWakeTarget reports whether target may be woken at all for a record of
 // targetKind. A reply wake is typed into the pane and carries the child's
 // text: only a Claude-compatible pane drains it at prompt time, and a shell
-// would execute it. Any other record wakes a conductor or any other parent
-// that runs an agent: an explicit parent link is delegation, so conductor
-// residency does not limit who receives an actionable child turn, but a plain
-// shell would execute the typed line.
+// would execute it. Any other record wakes a conductor, and (issue #3131)
+// an idle Claude-compatible parent whose [inbox] wake_parents is on (off by
+// default). The digest wakes only a conductor.
 func isWakeTarget(target *Instance, targetKind string) bool {
-	if targetKind == InboxTargetKindReply {
+	switch targetKind {
+	case InboxTargetKindReply:
 		return IsClaudeCompatible(target.Tool)
+	case inboxWakeKindDigest:
+		return isConductorSession(target)
 	}
-	return isConductorSession(target) || target.Tool != "shell"
+	if isConductorSession(target) {
+		return true
+	}
+	return IsClaudeCompatible(target.Tool) && ResolveInboxConfigForInstance(target).GetWakeParents()
 }
 
 // sendWakeNudge fires one best-effort wake into the parent conductor's pane and
@@ -205,19 +223,34 @@ func isWakeTarget(target *Instance, targetKind string) bool {
 // only reached for an IDLE pane means the send won't sit in tmux's busy-queue.
 // A failed send is harmless (the record still drains on the next turn).
 func sendWakeNudge(parent *Instance, profile, message string) error {
-	if parent == nil {
-		return nil
-	}
-	if strings.TrimSpace(message) == "" {
-		message = wakeNudgeMessage
-	}
-	go func(profile, ref, message string) {
-		if err := sendWakeNudgeNoWait(profile, ref, message); err != nil {
-			commsLog.Warn("wake_nudge_dispatch_failed",
-				slog.String("parent", ref), slog.String("error", err.Error()))
-		}
-	}(profile, parent.ID, message)
-	return nil
+	return wakeDispatch(&strayLegs, parent, profile, message)
+}
+
+// dispatch is the wiring's own sendWakeNudge: its pi doorbells are counted on
+// this wiring, so its notifier's Flush waits for them and for no one else's.
+func (w *wakeNudgeWiring) dispatch(parent *Instance, profile, message string) error {
+	return wakeDispatch(&w.legs, parent, profile, message)
+}
+
+// wakeNeedsInputPrompt reports whether a typed wake into target is sent with
+// --require-input-prompt (issue #3131): a Claude-compatible session that is
+// not a conductor. Those are ordinary sessions (a reply target, a parent
+// woken by a kickoff reply or [inbox] wake_parents), often the one a person
+// is working in, and the idle gate admits StatusWaiting, which also covers a
+// pane sitting at a permission dialog or a picker. The guard refuses an open
+// menu before any key is typed; the record still drains at the next turn.
+// Conductor wakes, and the typed fallback for other harnesses (a pi doorbell
+// with no extension listening), keep the send they always had.
+func wakeNeedsInputPrompt(target *Instance) bool {
+	return target != nil && IsClaudeCompatible(target.Tool) && !isConductorSession(target)
+}
+
+// sendWakeNudgeTyped types one wake line into target's pane through the
+// guarded `session send` pipeline, adding --require-input-prompt when
+// wakeNeedsInputPrompt says so. Every typed wake leg goes through here
+// (wake_send.go), so the guard holds whichever route reaches the pane.
+func sendWakeNudgeTyped(target *Instance, profile, message string) error {
+	return sendWakeNudgeCmd(profile, target.ID, message, wakeNeedsInputPrompt(target))
 }
 
 // fireDigestNudge wakes an idle parent once for info that waited past the
@@ -228,13 +261,13 @@ func (n *TransitionNotifier) fireDigestNudge(parent *Instance, profile, message 
 	if w == nil || w.nudger == nil || parent == nil {
 		return false
 	}
-	sent, err := w.nudge(parent, "parent", profile, message)
+	sent, err := w.nudge(parent, inboxWakeKindDigest, profile, message)
 	if err != nil {
 		commsLog.Warn("digest_nudge_send_failed",
 			slog.String("parent", parent.ID), slog.String("error", err.Error()))
 		return false
 	}
-	if sent {
+	if sent && !ridesPiSocket(parent) {
 		SpoolCommsWake(parent.ID, "inbox", "tmux", message, "")
 	}
 	return sent
@@ -276,15 +309,31 @@ const MachineSendEnv = "AGENTDECK_SEND_MACHINE"
 // pane is wedged. The context deadline is a belt-and-suspenders backstop for the
 // case where even the subprocess itself hangs.
 func sendWakeNudgeNoWait(profile, ref, message string) error {
+	return sendWakeNudgeCmd(profile, ref, message, false)
+}
+
+// sendWakeNudgeCmd is sendWakeNudgeNoWait with the input-prompt guard
+// chosen by the caller (wakeNeedsInputPrompt).
+func sendWakeNudgeCmd(profile, ref, message string, guardPrompt bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), wakeNudgeSendTimeout)
 	defer cancel()
-	bin := agentDeckBinaryPath()
+	return wakeNudgeExec(ctx, agentDeckBinaryPath(), wakeNudgeSendArgs(profile, ref, message, guardPrompt)...)
+}
+
+// wakeNudgeSendArgs is the argv of the wake send. It is always the guarded
+// `session send` pipeline: its composer-draft guard never types over text a
+// person left in the input box (it waits, then refuses). guardPrompt adds
+// --require-input-prompt, which also refuses an open menu (wakeNeedsInputPrompt).
+func wakeNudgeSendArgs(profile, ref, message string, guardPrompt bool) []string {
 	args := []string{}
 	if profile != "" {
 		args = append(args, "-p", profile)
 	}
 	// --no-tag: the daemon may have inherited a session's AGENTDECK_INSTANCE_ID;
 	// a wake line is never a send from that session.
-	args = append(args, "session", "send", ref, message, "--no-wait", "--no-tag", "-q")
-	return wakeNudgeExec(ctx, bin, args...)
+	args = append(args, "session", "send", ref, message, "--no-wait", "--no-tag")
+	if guardPrompt {
+		args = append(args, "--require-input-prompt")
+	}
+	return append(args, "-q")
 }

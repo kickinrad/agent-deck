@@ -666,6 +666,12 @@ func commandNeedsShell(command string) bool {
 	return false
 }
 
+// notLocal reports whether the instance's process runs somewhere other than
+// this host's own pane: over SSH, in a sandbox, or behind its own wrapper.
+func (i *Instance) notLocal() bool {
+	return i.SSHHost != "" || i.IsSandboxed() || strings.TrimSpace(i.Wrapper) != ""
+}
+
 // hasEffectiveWrapper returns true if the instance has a wrapper configured,
 // either directly on the instance or via the tool definition in config.toml.
 func (i *Instance) hasEffectiveWrapper() bool {
@@ -685,6 +691,10 @@ func (i *Instance) loadCustomPatternsFromConfig() {
 	if i.tmuxSession == nil {
 		return
 	}
+	i.tmuxSession.SetPreEnterDelay(preEnterDelayForTool(i.Tool))
+	// A composer that ingests a typed burst character by character needs the
+	// body framed; see framePasteForTool.
+	i.tmuxSession.SetFramePastes(framePasteForTool(i.Tool))
 
 	// Merge built-in defaults with any user config overrides/extras
 	raw := MergeToolPatterns(i.Tool)

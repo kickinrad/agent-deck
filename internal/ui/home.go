@@ -14,7 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"al.essio.dev/pkg/shellescape"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -33,6 +32,7 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/menudata"
 	"github.com/asheshgoplani/agent-deck/internal/optiming"
 	"github.com/asheshgoplani/agent-deck/internal/provider"
+	"github.com/asheshgoplani/agent-deck/internal/reportloop"
 	"github.com/asheshgoplani/agent-deck/internal/safego"
 	"github.com/asheshgoplani/agent-deck/internal/session"
 	"github.com/asheshgoplani/agent-deck/internal/statedb"
@@ -44,6 +44,7 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/update"
 	"github.com/asheshgoplani/agent-deck/internal/vcs"
 	"github.com/asheshgoplani/agent-deck/internal/vcsbackend"
+	"github.com/asheshgoplani/agent-deck/internal/voicestate"
 	"github.com/asheshgoplani/agent-deck/internal/watcher"
 )
 
@@ -292,6 +293,8 @@ type Home struct {
 	feedbackDialog       *FeedbackDialog       // For in-app feedback popup (Phase 2)
 	askDialog            *AskDialog            // ASK-117: owner answers an agent's ask secret|choice|text
 	reportDialog         *ReportDialog         // "Report a problem" form: bug/idea -> GitHub issue (internal/issuereport)
+	whatsNewDialog       *WhatsNewDialog       // "What's new": fixed reports + highlights after an update (internal/reportloop)
+	whatsNewPending      *reportloop.WhatsNew  // startup notes waiting for a free screen (maybeShowWhatsNew)
 	telemetryDialog      *TelemetryDialog      // One-time opt-in telemetry consent prompt (TELEMETRY.md)
 	tel                  homeTelemetry         // Opt-in telemetry sampler and TUI lifetime (home_telemetry.go)
 	zoxidePicker         *ZoxidePicker         // Quick-open picker backed by the zoxide DB
@@ -312,6 +315,12 @@ type Home struct {
 	triggersRev      string
 	triggersKey      string
 	triggersPollGen  int
+	// Voice mic badge (voice_badge.go): the reader stats ~/.claude/voice on
+	// the tick; rows render from voiceState only. voiceNow is the clock the
+	// badge words use (nil = time.Now).
+	voiceReader *voicestate.Reader
+	voiceState  *voicestate.State
+	voiceNow    func() time.Time
 	// agentsView is the last built fleet view; agentBySession indexes its
 	// rows by adopted session id so the session list can mark agent-owned
 	// rows and the preview pane can render their card. Both are empty for a
@@ -512,7 +521,11 @@ type Home struct {
 	// Hook-based status detection (Claude Code lifecycle hooks)
 	hookWatcher              *session.StatusFileWatcher
 	pendingHooksPrompt       bool // True if user should be prompted to install Claude hooks
+	claudeHooksBoxShown      bool // The fallback Claude hooks box was shown this run (showClaudeHooksBox)
 	pendingHermesHooksPrompt bool // True if user should be prompted to install Hermes hooks
+
+	// hints is the one-key onboarding hint bar (onboarding_hints.go, ASK-211).
+	hints onboardingHints
 
 	// SSE-based status detection for OpenCode sessions (issue #1614)
 	sseWatcher *session.OpenCodeSSEWatcher
@@ -1043,9 +1056,31 @@ type Home struct {
 	// pendingRemoteCreate holds the remote create whose path the server
 	// reported missing, while the create-directory confirmation is open.
 	pendingRemoteCreate *remoteCreateDirNeededMsg
+	// reservedTitles counts the titles of dialog creates still in flight, so
+	// a second quick create derives a different name (#2913). Touched only on
+	// the UI goroutine: added on submit, released by sessionCreatedMsg.
+	reservedTitles map[string]int
+	// createDirName is the Name field as typed when a dialog create stopped at
+	// "Directory Not Found"; Cancel returns to the dialog with it (#2913).
+	createDirName     string
+	createDirFromForm bool
 	// sandboxProvisioner replaces provider.Provision for a "new sandbox"
 	// Where pick (tests stub it); nil uses defaultSandboxProvisioner.
 	sandboxProvisioner func(ctx context.Context, opts provider.ProvisionOptions) (*provider.Provisioned, error)
+	// sandboxDestroyDeps replaces the remote and provider calls of a TUI
+	// sandbox destroy (tests); nil uses the real ones.
+	sandboxDestroyDeps *sandboxDestroyDeps
+	// sandboxOps are the sandbox creates and destroys shown in the status
+	// line above the list (home_sandbox_destroy.go). Event-loop goroutine
+	// only.
+	sandboxOps   map[uint64]*sandboxOp
+	sandboxOpSeq uint64
+	// sandboxProvisionMu guards the count of sandbox provisionings in
+	// flight; quit waits for them (waitSandboxProvisions) so a cancelled
+	// create still finishes its rollback (#2918).
+	sandboxProvisionMu   sync.Mutex
+	sandboxProvisionN    int
+	sandboxProvisionIdle chan struct{} // closed when the count drops to 0
 	// insertKeySender is the persistent dispatch path opened on
 	// enterInsertMode and closed on exitInsertMode (#1102 perf fix +
 	// remote support). Local sessions get a tmux.KeySender (control-mode
@@ -1102,6 +1137,24 @@ type Home struct {
 	// session's active window; >= 0 targets that specific window. When nil, the
 	// dispatch calls the tmux session directly. See issue #1369.
 	quickApproveSink func(inst *session.Instance, windowIndex int) error
+
+	// onboarding is the quick check / "What you can do" overlay (onboarding.go).
+	onboarding *OnboardingOverlay
+	// welcomeSel is the highlighted action of the welcome empty screen
+	// (welcome.go); welcomeAgents caches its agent detection and
+	// welcomeAgentsKnown says whether it ran; welcomeNotice is its one-line
+	// result (e.g. nothing to import).
+	welcomeSel         int
+	welcomeAgents      []onboardingAgent
+	welcomeAgentsKnown bool
+	welcomeAnyAgent    bool // any agent at all, picker and custom tools too
+	welcomeNotice      string
+	// welcomeImportable is how many tmux sessions the welcome's Import
+	// would bring in; welcomeImportKnown says whether it was counted.
+	welcomeImportable  int
+	welcomeImportKnown bool
+	// onboardingCmds are queued by the overlay and handed out by Update.
+	onboardingCmds []tea.Cmd
 }
 
 // reloadState preserves UI state during storage reload
@@ -2017,7 +2070,7 @@ func (h *Home) backgroundStatusUpdate() {
 		if sharedStatuses != nil {
 			for _, inst := range instances {
 				if s, ok := sharedStatuses[inst.ID]; ok && s.Acknowledged {
-					inst.SetAcknowledgedFromShared(true)
+					inst.SetAcknowledgedFromSharedAt(s.AcknowledgedAt)
 				}
 			}
 		}
@@ -2156,6 +2209,14 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Execute final shutdown logic after splash delay
 		return h, h.performFinalShutdown(bool(msg))
 
+	case onboardingHintsDoneMsg:
+		h.handleOnboardingHintsDone(msg)
+		return h, nil
+
+	case onboardingStatusMsg, onboardingLoginDoneMsg:
+		h.handleOnboardingMsg(msg)
+		return h, nil
+
 	case askPollMsg, askSeenMsg, askDeliveredMsg, askCancelledMsg, askTickMsg, askCloseMsg:
 		return h, h.askDialog.HandleMsg(msg, func() bool { return h.canShowAsk(time.Now()) })
 
@@ -2177,6 +2238,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.updateSizes()
 		h.syncViewport() // Recalculate viewport when window size changes
 		h.setupWizard.SetSize(msg.Width, msg.Height)
+		if h.onboarding != nil {
+			h.onboarding.SetSize(msg.Width, msg.Height)
+		}
 		h.settingsPanel.SetSize(msg.Width, msg.Height)
 		h.watcherPanel.SetSize(msg.Width, msg.Height)
 		h.agentsPanel.SetSize(msg.Width, msg.Height)
@@ -2228,7 +2292,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				h.endDividerDrag()
 				h.syncPointerShape()
 			}
-			if h.setupWizard.IsVisible() {
+			if h.setupWizard.IsVisible() || h.onboarding.IsVisible() {
 				return h, nil
 			}
 			if h.toolVisibilityPanel != nil && h.toolVisibilityPanel.IsVisible() {
@@ -2448,9 +2512,36 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		h.reloadHotkeysFromConfig()
 
+		// A fresh install gets the Welcome in place of the setup wizard
+		// (onboarding.go); it then holds off the prompts below like the
+		// wizard did.
+		if firstLoad {
+			noSessions := msg.err == nil && len(msg.instances) == 0
+			freshInstall := h.maybeStartOnboarding(noSessions)
+			h.armOnboardingHints(freshInstall, noSessions)
+			if !noSessions && msg.err == nil {
+				h.resumeOnboardingHints(msg.instances[0].Title)
+			}
+			// The Alt+j/k tip is for moving between sessions: held back
+			// on the welcome (ASK-211), where there are none.
+			if noSessions && h.navHintActive {
+				h.navHintActive = false
+				if h.maintenanceMsg == navHintText {
+					h.maintenanceMsg = ""
+				}
+			}
+		}
+
 		// Show hooks installation prompt (after splash screen is gone)
-		if !h.setupWizard.IsVisible() {
-			h.showPendingHooksPrompt()
+		if !h.setupWizard.IsVisible() && !h.onboarding.IsVisible() {
+			// A profile with sessions keeps the Claude hooks box it always
+			// had; an empty one is asked by the New Session form's line.
+			// (The Hermes box follows once it is answered.)
+			// (h.instances is filled further down, so msg says it.)
+			hasSessions := msg.err == nil && len(msg.instances) > 0
+			if !(firstLoad && hasSessions && claudeHooksRelevant(msg.instances) && h.showClaudeHooksBox(false)) {
+				h.showPendingHooksPrompt()
+			}
 		}
 
 		// One-time telemetry consent prompt (TELEMETRY.md). Shown only on the
@@ -2526,6 +2617,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			h.instancesMu.Lock()
 			oldCount := len(h.instances)
+			session.CarryOverReloadState(h.instances, msg.instances)
 			h.instances = msg.instances
 			newCount := len(msg.instances)
 			uiLog.Debug("reload_load_sessions", slog.Int("old_count", oldCount), slog.Int("new_count", newCount), slog.String("profile", h.profile))
@@ -2724,6 +2816,11 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			slog.Bool("has_err", msg.err != nil),
 			slog.String("temp_id", msg.tempID),
 			slog.Bool("has_instance", msg.instance != nil))
+		// The first session of a fresh install starts the hint bar (ASK-211).
+		if msg.err == nil && msg.instance != nil {
+			h.startOnboardingHints(msg.instance.Title)
+		}
+		h.releaseTitle(msg.reservedTitle)
 		// Remove the creating placeholder (if any) — always, on success or error
 		if msg.tempID != "" {
 			delete(h.creatingSessions, msg.tempID)
@@ -2739,6 +2836,8 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Skip in-memory state update (reload will handle that), but persist to disk
 			uiLog.Debug("reload_save_session_created", slog.String("id", msg.instance.ID), slog.String("title", msg.instance.Title))
 			h.instancesMu.Lock()
+			// Put it last in its group; a zero Order would land mid-group (#2933).
+			msg.instance.Order = session.NextSessionOrder(h.instances, msg.instance.GroupPath)
 			h.instances = append(h.instances, msg.instance)
 			h.instancesMu.Unlock()
 			// Force save to persist the session even during reload
@@ -2802,6 +2901,13 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				h.setError(noticeError(h.err, msg.setupWarning))
 			}
 
+			// A local Claude session made without the form's hooks line
+			// (quick create, a pick made elsewhere) still gets the hooks
+			// question once, as the old box (ASK-211 review).
+			if session.IsClaudeCompatible(msg.instance.Tool) {
+				h.showClaudeHooksBox(true)
+			}
+
 			// Auto-attach to the new session when [ui].attach_on_create is set,
 			// so creating a session "instantly opens" it instead of only moving
 			// the cursor to it. The session was just Start()ed (see
@@ -2836,6 +2942,8 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// CRITICAL: Save the forked session to JSON immediately to prevent orphaning
 			uiLog.Debug("reload_save_session_forked", slog.String("id", msg.instance.ID), slog.String("title", msg.instance.Title))
 			h.instancesMu.Lock()
+			// Put it last in its group; a zero Order would land mid-group (#2933).
+			msg.instance.Order = session.NextSessionOrder(h.instances, msg.instance.GroupPath)
 			h.instances = append(h.instances, msg.instance)
 			h.instancesMu.Unlock()
 			h.forceSaveInstances()
@@ -3609,6 +3717,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sandboxProvisionedMsg:
 		return h, h.handleSandboxProvisioned(msg)
 
+	case sandboxDestroyedMsg:
+		return h, h.handleSandboxDestroyed(msg)
+
 	case remoteCreateDirNeededMsg:
 		// The server refused the path; ask before retrying with --create-dir
 		// so a typo never silently creates a directory on the remote.
@@ -3858,6 +3969,28 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
+	case whatsNewLoadedMsg:
+		h.onWhatsNewLoaded(msg)
+		return h, nil
+
+	case whatsNewPreparedMsg:
+		if h.whatsNewDialog != nil {
+			h.whatsNewDialog.OnPrepared(msg)
+		}
+		return h, nil
+
+	case whatsNewPostedMsg:
+		if h.whatsNewDialog != nil {
+			h.whatsNewDialog.OnPosted(msg)
+		}
+		return h, nil
+
+	case whatsNewSeenMsg:
+		if msg.err != nil {
+			uiLog.Warn("whats_new_mark_seen_failed", slog.String("error", msg.err.Error()))
+		}
+		return h, nil
+
 	case feedbackSentMsg:
 		// Route the result into the dialog so stepSent renders success or an explicit
 		// error line (v1.7.37, #679 TUI follow-up). Auto-dismiss still fires via timer.
@@ -3959,6 +4092,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case refreshMsg:
 		return h, h.sessionLoadCmd(nil, true)
+	case welcomeNoticeMsg:
+		h.welcomeNotice = msg.text
+		return h, nil
 	case importReloadMsg:
 		state := h.preserveState()
 		return h, h.sessionLoadCmd(&state, false)
@@ -4004,6 +4140,11 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statusUpdateMsg:
 		// Clear attach flag - we've returned from the attached session
 		h.isAttaching.Store(false) // Atomic store for thread safety
+		// Back from an attached session: hint step 2 (Ctrl+Q) is done.
+		if msg.attachedSessionID != "" {
+			h.advanceOnboardingHint(hintStepBack)
+			h.clearBackHintInStatus()
+		}
 		if !msg.detachedAt.IsZero() {
 			h.pendingFrameOp, h.pendingFrameStart = "tui.detach", msg.detachedAt
 		}
@@ -4560,6 +4701,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		h.expireDividerHover(time.Now())
+		h.maybeShowWhatsNew()
 		h.telemetrySample()
 
 		// Honor a pending `agent-deck session focus <id>` request from the CLI.
@@ -4576,6 +4718,11 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// card reflect live state without the panel being open. Internally
 		// rate-limited, and a no-op when nothing has been adopted.
 		h.refreshAgentsPanel()
+
+		// 🎙 voice badge: stat the voice state file, re-read it only when
+		// it changed (voice_badge.go). Local file, no network; any error
+		// reads as no voice.
+		h.refreshVoiceState()
 
 		var remoteFetchCmd tea.Cmd
 		var remoteLatencyCmd tea.Cmd
@@ -4876,6 +5023,11 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return h, cmd
 		}
 
+		// The Welcome / "What you can do" overlay is modal too.
+		if h.onboarding.IsVisible() {
+			return h.handleOnboardingKey(msg)
+		}
+
 		// Handle delivery and watcher panels (before settings panel)
 		if h.triggersPanel.IsVisible() {
 			var cmd tea.Cmd
@@ -4981,6 +5133,11 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Help overlay takes priority (any key closes it)
 		if h.helpOverlay.IsVisible() {
 			h.helpOverlay, _ = h.helpOverlay.Update(msg)
+			// Help closed after hint step 4: "You know the basics" shows for
+			// a moment, then the bar is gone (ASK-211).
+			if !h.helpOverlay.IsVisible() && h.hints.step == hintStepDone {
+				return h, h.onboardingHintsDoneCmd()
+			}
 			return h, nil
 		}
 		if h.search.IsVisible() {
@@ -5050,6 +5207,15 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.reportDialog = d
 			return h, cmd
 		}
+		if h.whatsNewDialog.IsVisible() {
+			d, cmd := h.whatsNewDialog.Update(msg)
+			h.whatsNewDialog = d
+			if !d.IsVisible() {
+				// Closed: startup notes still waiting are dropped too.
+				h.whatsNewPending = nil
+			}
+			return h, cmd
+		}
 		if h.feedbackDialog.IsVisible() {
 			d, cmd := h.feedbackDialog.Update(msg)
 			h.feedbackDialog = d
@@ -5087,47 +5253,11 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 // createSessionFromGlobalSearch creates a new Agent Deck session from global search result
 func (h *Home) createSessionFromGlobalSearch(result *GlobalSearchResult) tea.Cmd {
 	return func() tea.Msg {
-		// Derive title from CWD or session ID
-		title := "Claude Session"
-		projectPath := result.CWD
-		if result.CWD != "" {
-			parts := strings.Split(result.CWD, "/")
-			if len(parts) > 0 {
-				title = parts[len(parts)-1]
-			}
-		}
-		if projectPath == "" {
-			projectPath = "."
-		}
-		// #1706: "." (and any relative CWD a search result carries) must not be
-		// persisted as project_path — tmux resolves it against the tmux server's
-		// cwd, and the Claude project slug derived from it would point elsewhere
-		// again.
-		if resolved, resErr := session.ResolveProjectPath(projectPath); resErr == nil {
-			projectPath = resolved
-		}
-
-		// Create instance. Issue #666: resolveNewSessionGroup rescues empty
-		// cursor-group (Window / RemoteGroup / placeholder flatItems) so
-		// the empty string never reaches NewInstanceWithGroupAndTool, which
-		// would otherwise override the extractGroupPath default with "".
-		inst := session.NewInstanceWithGroupAndTool(title, projectPath, h.resolveNewSessionGroup(), "claude")
-		inst.ClaudeSessionID = result.SessionID
-		// #1815: the user picked this exact conversation for this brand-new
-		// instance — an explicit ownership declaration, not a disk-scan
-		// guess. Route it through the chokepoint like every other explicit
-		// writer (launch_cmd.go, mutators.go) instead of relying on a fresh
-		// instance's taint map being empty by construction.
-		session.MarkClaudeSessionIDVerified(inst)
-
-		// Build resume command with config dir and permission flags
-		userConfig, _ := session.LoadUserConfig()
-		opts := session.NewClaudeOptions(userConfig)
-
-		inst.Command = globalSearchClaudeCommand(inst, result.SessionID, opts)
-
-		// Persist options so restarts use per-session settings
-		_ = inst.SetClaudeOptions(opts)
+		// Issue #666: resolveNewSessionGroup rescues empty cursor-group
+		// (Window / RemoteGroup / placeholder flatItems) so the empty string
+		// never reaches NewInstanceWithGroupAndTool, which would otherwise
+		// override the extractGroupPath default with "".
+		inst := newGlobalSearchInstance(result, h.resolveNewSessionGroup())
 
 		// Start the session
 		if err := inst.Start(); err != nil {
@@ -5139,56 +5269,54 @@ func (h *Home) createSessionFromGlobalSearch(result *GlobalSearchResult) tea.Cmd
 	}
 }
 
-// globalSearchClaudeCommand builds the claude resume command for a global
-// search hit. sessionID comes from an indexed transcript's "sessionId" field
-// (recall NativeID), i.e. file data, so it is shell-quoted like every other
-// claude resume id; ordinary UUIDs are left byte-identical.
-func globalSearchClaudeCommand(inst *session.Instance, sessionID string, opts *session.ClaudeOptions) string {
-	// Build command - only set CLAUDE_CONFIG_DIR if explicitly configured
-	// If not explicit, let the tmux shell's environment handle it
-	// This is critical for WSL and other environments where users have
-	// CLAUDE_CONFIG_DIR set in their .bashrc/.zshrc
-	var cmdBuilder strings.Builder
-	if session.IsClaudeConfigDirExplicitForGroup(inst.GroupPath) {
-		configDir := session.GetClaudeConfigDirForGroup(inst.GroupPath)
-		// #1815 (Codex review on #1830): quote exactly as
-		// Instance.buildBashExportPrefix does (instance.go, audit F2) —
-		// this string is baked into inst.Command and ends up in a
-		// `bash -c` payload, so an unquoted config_dir containing
-		// whitespace, ;, or $(...) breaks the command or injects.
-		cmdBuilder.WriteString(fmt.Sprintf("CLAUDE_CONFIG_DIR=%s ", shellescape.Quote(configDir)))
+// newGlobalSearchInstance builds the claude instance for a global search hit,
+// bound to the picked conversation and ready for Start().
+//
+// It deliberately leaves Command as the base "claude" command and does not
+// build a resume command line itself. Start() routes an instance with a
+// ClaudeSessionID through buildClaudeResumeCommand, which resolves
+// [claude].command, exports CLAUDE_CONFIG_DIR (quoted), applies the
+// permission flags from the ClaudeOptions set below, runs the #1815 resume
+// identity guard, picks --resume or --session-id from the transcript on disk
+// and shell-quotes the id (result.SessionID is transcript file data). Any
+// other Command is treated there as a custom claude binary, so a baked
+// `exec claude --resume <id>` would be spliced in as the binary and the pane
+// would die on `exec exec claude ...` (exit 127).
+func newGlobalSearchInstance(result *GlobalSearchResult, group string) *session.Instance {
+	// Derive title from CWD or session ID
+	title := "Claude Session"
+	projectPath := result.CWD
+	if result.CWD != "" {
+		parts := strings.Split(result.CWD, "/")
+		if len(parts) > 0 {
+			title = parts[len(parts)-1]
+		}
 	}
-	// #1815: the TUI picker builds a resume command too, so it routes
-	// through the same resume-time identity guard as restart / start /
-	// fork. The id was just recorded onto inst above (the user picked
-	// this conversation FOR this session), so the check passes by
-	// construction today — it is here so a future change that reuses an
-	// existing instance here cannot resume a conversation that instance
-	// does not own. Only the identity half applies: the user's explicit
-	// pick must not be downgraded to a fresh session by the
-	// conversation-data heuristics.
-	//
-	// exec so the agent replaces the wrapper shell and leads the pane,
-	// matching buildClaudeResumeCommand and the fresh-start path
-	if allowed, _ := session.ResumeIdentityAllowed(inst, sessionID); allowed {
-		cmdBuilder.WriteString("exec claude --resume ")
-		cmdBuilder.WriteString(shellescape.Quote(sessionID))
-	} else {
-		freshID := session.NewClaudeSessionUUID()
-		inst.ClaudeSessionID = freshID
-		// #1815: a freshly minted id is vouched ownership, same as every
-		// other minted-id writer (Instance.replaceRefusedClaudeSessionID,
-		// buildClaudeCommandWithMessage's own mint path).
-		session.MarkClaudeSessionIDVerified(inst)
-		cmdBuilder.WriteString("exec claude --session-id ")
-		cmdBuilder.WriteString(freshID)
+	if projectPath == "" {
+		projectPath = "."
 	}
-	if opts.SkipPermissions {
-		cmdBuilder.WriteString(" --dangerously-skip-permissions")
-	} else if opts.AllowSkipPermissions {
-		cmdBuilder.WriteString(" --allow-dangerously-skip-permissions")
+	// #1706: "." (and any relative CWD a search result carries) must not be
+	// persisted as project_path — tmux resolves it against the tmux server's
+	// cwd, and the Claude project slug derived from it would point elsewhere
+	// again.
+	if resolved, resErr := session.ResolveProjectPath(projectPath); resErr == nil {
+		projectPath = resolved
 	}
-	return cmdBuilder.String()
+
+	inst := session.NewInstanceWithGroupAndTool(title, projectPath, group, "claude")
+	inst.Command = "claude"
+	inst.ClaudeSessionID = result.SessionID
+	// #1815: the user picked this exact conversation for this brand-new
+	// instance — an explicit ownership declaration, not a disk-scan
+	// guess. Route it through the chokepoint like every other explicit
+	// writer (launch_cmd.go, mutators.go) instead of relying on a fresh
+	// instance's taint map being empty by construction.
+	session.MarkClaudeSessionIDVerified(inst)
+
+	// Persist options so start and later restarts use per-session settings
+	userConfig, _ := session.LoadUserConfig()
+	_ = inst.SetClaudeOptions(session.NewClaudeOptions(userConfig))
+	return inst
 }
 
 // handleMouse handles mouse events (click to select, double-click to activate)
@@ -5335,6 +5463,12 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 	}
 
+	// The onboarding hint bar (ASK-211): Esc hides it for good; n and ?
+	// advance it and still do their usual thing.
+	if h.onboardingHintKey(key) {
+		return h, nil
+	}
+
 	// v1.7.60: any keypress dismisses the one-shot nav-discoverability hint
 	// (beyond the existing ESC path). The sentinel was already written at
 	// NewHome, so this only has to clear the visible banner.
@@ -5342,6 +5476,13 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.navHintActive = false
 		if h.maintenanceMsg == navHintText {
 			h.maintenanceMsg = ""
+		}
+	}
+
+	// The welcome empty screen (welcome.go) owns its three actions and ↑↓.
+	if h.welcomeActive() {
+		if handled, cmd := h.handleWelcomeKey(key); handled {
+			return h, cmd
 		}
 	}
 
@@ -5567,6 +5708,14 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			case item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil:
 				if req, ok := buildRemoteAttachRequest(item.RemoteName, item.RemoteSession.ID, openAs); ok {
+					// The window runs this machine's `agent-deck remote
+					// attach`, not a raw ssh line, so Ctrl+V image paste
+					// works there as after Enter (ASK-201).
+					if exe, err := os.Executable(); err == nil {
+						req.Remote.LocalCLI = exe
+						req.Remote.LocalProfile = h.profile
+						req.Remote.RemoteName = item.RemoteName
+					}
 					if err := h.openInNewWindow(req, true); err != nil {
 						h.setError(fmt.Errorf("open remote in new window: %w", err))
 					}
@@ -6220,103 +6369,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case "n":
-		// Reset any stale remote target from a previously abandoned flow.
-		h.pendingRemoteName = ""
-		// If the cursor is on a remote group/session, open the same
-		// new-session dialog as for local items but remember the remote
-		// target (#1353). The submit handler routes the create to the remote
-		// via SSH with the chosen tool, so the #743 invariant still holds:
-		// the session is never created on localhost. (Previously this
-		// quick-created a shell on the remote with no tool selection.)
-		if h.cursor >= 0 && h.cursor < len(h.flatItems) {
-			item := h.flatItems[h.cursor]
-			if item.Type == session.ItemTypeRemoteGroup || item.Type == session.ItemTypeRemoteSession {
-				return h, h.showRemoteNewSessionDialog(item)
-			}
-		}
-
-		// Collect unique project paths sorted by most recently accessed
-		type pathInfo struct {
-			path           string
-			lastAccessedAt time.Time
-		}
-		pathMap := make(map[string]*pathInfo)
-		for _, inst := range h.instances {
-			if inst.ProjectPath == "" {
-				continue
-			}
-			// Prefer the original repo root over worktree paths so suggestions
-			// don't show ephemeral worktree directories.
-			p := inst.ProjectPath
-			if inst.WorktreeRepoRoot != "" {
-				p = inst.WorktreeRepoRoot
-			}
-			existing, ok := pathMap[p]
-			if !ok {
-				// First time seeing this path.
-				accessTime := inst.LastAccessedAt
-				if accessTime.IsZero() {
-					accessTime = inst.CreatedAt // Fall back to creation time.
-				}
-				pathMap[p] = &pathInfo{
-					path:           p,
-					lastAccessedAt: accessTime,
-				}
-			} else {
-				// Update if this instance was accessed more recently.
-				accessTime := inst.LastAccessedAt
-				if accessTime.IsZero() {
-					accessTime = inst.CreatedAt
-				}
-				if accessTime.After(existing.lastAccessedAt) {
-					existing.lastAccessedAt = accessTime
-				}
-			}
-		}
-
-		// Convert to slice and sort by most recent first
-		pathInfos := make([]*pathInfo, 0, len(pathMap))
-		for _, info := range pathMap {
-			pathInfos = append(pathInfos, info)
-		}
-		sort.Slice(pathInfos, func(i, j int) bool {
-			return pathInfos[i].lastAccessedAt.After(pathInfos[j].lastAccessedAt)
-		})
-
-		// Extract sorted paths
-		paths := make([]string, len(pathInfos))
-		for i, info := range pathInfos {
-			paths[i] = info.path
-		}
-		h.newDialog.SetPathSuggestions(paths)
-
-		// Load recent sessions for the picker
-		if recents, err := h.storage.LoadRecentSessions(); err == nil {
-			h.newDialog.SetRecentSessions(recents)
-		}
-
-		// Apply the preselected tool: explicit [default_tool] config wins,
-		// otherwise fall back to the last successfully-submitted tool remembered
-		// in the profile StateDB (UX top-3 #2). First run (neither set) leaves
-		// shell selected, unchanged.
-		h.newDialog.SetDefaultTool(resolveInitialTool(session.GetDefaultTool(), rememberedTool(h.stateDB())))
-
-		// Independent roots start in the configured default group regardless of
-		// cursor or scoped view. Group and parent remain separate explicit dialog
-		// choices, so browsing a persona cannot silently create its child.
-		groupPath := session.DefaultGroupPath
-		groupName := groupPath
-		if group, exists := h.groupTree.Groups[groupPath]; exists {
-			groupName = group.Name
-		}
-		defaultPath := h.getDefaultPathForGroup(groupPath)
-		conductors := h.activeConductorSessions()
-		// A new session is an independent root unless the user explicitly picks
-		// a parent in the dialog. Cursor position may choose its group, never its
-		// orchestration parent.
-		h.newDialog.ShowInGroup(groupPath, groupName, defaultPath, conductors, "")
-		h.newDialog.SetWhereChoices(newDialogWhereChoicesFromConfig())
-		return h, nil
+		return h, h.openNewSessionDialog()
 
 	case "N":
 		// Check if cursor is on a remote group/session — create on remote instead
@@ -6354,6 +6407,12 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			} else if item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil {
 				h.confirmDialog.ShowDeleteRemoteSession(item.RemoteName, item.RemoteSession.ID, item.RemoteSession.Title)
+			} else if item.Type == session.ItemTypeRemoteGroup && item.Level == 0 {
+				// The host header of a provider sandbox: offer to destroy the
+				// sandbox (stopping its sessions, after a confirm that says how
+				// many). A plain remote's header is a local UI bucket with
+				// nothing to delete.
+				h.openDestroySandboxConfirm(item.RemoteName)
 			} else if item.Type == session.ItemTypeRemoteGroup && item.Level > 0 {
 				// One of the remote's own groups: delete it there, the way d on
 				// a local group header does here. The Level-0 host header is a
@@ -6476,6 +6535,9 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if item.Type == session.ItemTypeSession && item.Session != nil {
 				tmuxSess := item.Session.GetTmuxSession()
 				if tmuxSess != nil {
+					// Visit time first: a publish in between then sees no
+					// visit, never a cleared mark with the old visit time.
+					item.Session.ClearAcknowledgedAt()
 					tmuxSess.ResetAcknowledged()
 					// Persist to SQLite so background sync doesn't overwrite.
 					//
@@ -6899,6 +6961,24 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// MRU walk forward (#2058): redo — step to the next session in visit order.
 		return h.handleMRUWalk(true)
 
+	case defaultHotkeyBindings[hotkeyShowAround]:
+		// "Show me around" (ASK-131): what you can do, then Tab to the
+		// agents and sign-in page. Never the first-run variant.
+		h.openOnboarding(onboardingPageTour, false)
+		return h, nil
+
+	case defaultHotkeyBindings[hotkeyWhatsNew]:
+		// "What's new" on demand: this release's notes and any of your
+		// reports it fixed, with "Is it fixed for you?" (whats_new_dialog.go).
+		if h.whatsNewDialog != nil {
+			// The on-demand dialog replaces startup notes still waiting.
+			h.whatsNewPending = nil
+			cmd := h.whatsNewDialog.Open()
+			h.whatsNewDialog.SetSize(h.width, h.height)
+			return h, cmd
+		}
+		return h, nil
+
 	case defaultHotkeyBindings[hotkeyReportProblem]:
 		// "Report a problem": form -> full preview -> explicit confirm -> file
 		// through internal/issuereport (gh when logged in, else the browser).
@@ -7035,7 +7115,7 @@ func (h *Home) attachSelectedLegacy() tea.Cmd {
 		parentInst.SyncSessionIDsToTmux()
 		parentInst.MarkAccessed()
 		if parentInst.GetStatusThreadSafe() == session.StatusWaiting {
-			tmuxSess.Acknowledge()
+			parentInst.AcknowledgeVisit()
 			if db := statedb.GetGlobal(); db != nil {
 				_ = db.SetAcknowledged(parentInst.ID, true)
 			}
@@ -7108,6 +7188,11 @@ func (h *Home) performFinalShutdown(shutdownPool bool) tea.Cmd {
 		}
 		// Signal background worker to stop
 		h.cancel()
+		// A sandbox being provisioned saw the cancel above; let it roll
+		// back, or the sandbox is left running.
+		if !h.waitSandboxProvisions(sandboxQuitWait) {
+			uiLog.Warn("sandbox_provision_quit_timeout")
+		}
 		// Wait for background worker to finish (prevents race on shutdown)
 		if h.statusWorkerDone != nil {
 			select {
@@ -7525,6 +7610,9 @@ func (h *Home) attachSession(inst *session.Instance) tea.Cmd {
 	if tmuxSess == nil {
 		return nil
 	}
+	// Opening a session is hint step 1 (ASK-211).
+	h.advanceOnboardingHint(hintStepOpen)
+	h.showBackHintInStatus(tmuxSess)
 	var attachStart, detachedAt time.Time // tui.attach / tui.detach stamps, only while timings are on
 	if optiming.Enabled() {
 		attachStart = time.Now()
@@ -7578,7 +7666,7 @@ func (h *Home) attachSession(inst *session.Instance) tea.Cmd {
 	// - YELLOW (waiting) sessions turn gray when user looks at them
 	// - Detach just lets polling take over naturally
 	if inst.GetStatusThreadSafe() == session.StatusWaiting {
-		tmuxSess.Acknowledge()
+		inst.AcknowledgeVisit()
 		// Persist ack to SQLite so other instances see it
 		if db := statedb.GetGlobal(); db != nil {
 			_ = db.SetAcknowledged(inst.ID, true)
@@ -7636,7 +7724,7 @@ func (h *Home) attachSession(inst *session.Instance) tea.Cmd {
 		// of escape codes races with the Bubble Tea renderer.
 
 		// Update last accessed time to detach time (more accurate than attach time)
-		inst.MarkAccessed()
+		h.markDetachAccessed(inst)
 
 		// NOTE: We don't acknowledge on detach anymore.
 		// Acknowledgment happens on ATTACH (only if session was waiting/yellow).
@@ -7702,6 +7790,28 @@ func (h *Home) attachSession(inst *session.Instance) tea.Cmd {
 
 		return statusUpdateMsg{attachedSessionID: inst.ID, attachedWorkDir: currentWorkDir, detachedAt: detachedAt}
 	})
+}
+
+// markDetachAccessed stamps the detach time on the session that was on screen
+// when the user detached. That is attached unless the user jumped away with
+// the notification bar's Ctrl+b 1-9 keys during the attach, which
+// consumeAckSignal recorded in lastNotifSwitchID (#2949). The value is only
+// read here; the detach paths below still consume it for cursor sync.
+func (h *Home) markDetachAccessed(attached *session.Instance) {
+	target := attached
+	h.lastNotifSwitchMu.Lock()
+	switchedID := h.lastNotifSwitchID
+	h.lastNotifSwitchMu.Unlock()
+	if switchedID != "" && (attached == nil || switchedID != attached.ID) {
+		h.instancesMu.RLock()
+		if switched := h.instanceByID[switchedID]; switched != nil {
+			target = switched
+		}
+		h.instancesMu.RUnlock()
+	}
+	if target != nil {
+		target.MarkAccessed()
+	}
 }
 
 func (h *Home) followAttachReturnCwd(msg statusUpdateMsg) {
@@ -8032,6 +8142,7 @@ func (h *Home) sessionSwitcherOverlayRegion() terminalCellRect {
 	if h.maintenanceMsg != "" {
 		maintenanceBannerHeight = 1
 	}
+	maintenanceBannerHeight += h.sandboxStatusHeight() // sandbox status lines sit with the banners
 	debugBarHeight := 0
 	if h.debugMode {
 		debugBarHeight = 1
@@ -8372,7 +8483,7 @@ func (h *Home) renderSessionItem(
 			hookStatus = h.hookWatcher.GetHookStatus(inst.ID)
 		}
 		confirmedTs, confirmedObserved := inst.LastObservedActivity()
-		ts := sessionActivityTime(inst.CreatedAt, inst.LastStartedAt, inst.LastActivityAt(), inst.LastAccessedAt, confirmedTs, confirmedObserved, hookStatus)
+		ts := sessionActivityTime(inst.CreatedAt, inst.LastStartedAt, inst.LastActivityAt(), inst.GetLastAccessedAtThreadSafe(), confirmedTs, confirmedObserved, hookStatus)
 		timestampBadge = tsStyle.Render(" " + formatRelativeTime(ts))
 	}
 
@@ -8461,6 +8572,14 @@ func (h *Home) renderSessionItem(
 		titleFloor := min(available, minSessionTitleWidth)
 		badgeBudget = max(0, available-titleFloor)
 	}
+	// 🎙 voice badge (voice_badge.go): this row holds the voice mic. Its
+	// glyph form is fitted first so it outlasts the viewers, ⚡ and account
+	// badges; the words replace it below only if the whole title still fits.
+	voiceState := h.voiceForLocal(inst)
+	voiceBadgeText, voiceWidth := fitVoiceBadge(voiceState, selected, badgeBudget, 0, h.voiceClock())
+	if badgeBudget >= 0 {
+		badgeBudget = max(0, badgeBudget-voiceWidth)
+	}
 	cachedViewers, cachedViewersKnown := inst.ViewersCached()
 	viewersBadgeText, viewersWidth := fitViewersBadge(cachedViewers, cachedViewersKnown, selected, badgeBudget)
 	// ⚡N: how many triggers wake this session (triggers_live.go). Read from
@@ -8483,19 +8602,26 @@ func (h *Home) renderSessionItem(
 		}
 		accountBadge = accountStyle.Render(accountBadge)
 	}
+	if voiceWidth > 0 {
+		wordsBudget := -1
+		if listWidth > 0 {
+			wordsBudget = max(0, listWidth-reserved-cellWidth(displayTitle)-viewersWidth-triggersWidth-accountWidth-1)
+		}
+		voiceBadgeText, voiceWidth = fitVoiceBadge(voiceState, selected, -1, wordsBudget, h.voiceClock())
+	}
 	if listWidth > 0 {
-		budget := max(0, listWidth-reserved-viewersWidth-triggersWidth-accountWidth-1)
+		budget := max(0, listWidth-reserved-voiceWidth-viewersWidth-triggersWidth-accountWidth-1)
 		if cellWidth(displayTitle) > budget {
 			displayTitle = cellTruncate(displayTitle, budget, "…")
 		}
 	}
 	title := titleStyle.Render(displayTitle)
 
-	// Build row: [gutter][baseIndent][selection][tree][chevron][status] [title] [tool] [badges]
+	// Build row: [gutter][baseIndent][selection][tree][chevron][status] [title] [voice] [tool] [badges]
 	// The leading gutter (leftGutterWidth) keeps sessions aligned with group
 	// rows, which reserve the same gutter for root hotkey numbers.
 	row := fmt.Sprintf(
-		"%s%s%s%s%s%s %s%s%s%s%s%s%s%s%s%s%s%s%s%s",
+		"%s%s%s%s%s%s %s%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
 		strings.Repeat(" ", leftGutterWidth),
 		baseIndent,
 		selectionPrefix,
@@ -8503,6 +8629,7 @@ func (h *Home) renderSessionItem(
 		windowChevron,
 		status,
 		title,
+		voiceBadgeText,
 		tool,
 		maestroBadge,
 		yoloBadge,
@@ -8836,4 +8963,127 @@ func (h *Home) handleSessionSwitcherKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Ignore other keys (incl. Tab) without disturbing the commit timer.
 		return h, nil
 	}
+}
+
+// openNewSessionDialog is the `n` key: the New Session dialog with this
+// folder, the remembered tool and the selected group filled in (ASK-110), or
+// the remote variant when the cursor is on a remote. The first-run Welcome
+// opens it the same way (onboarding.go).
+func (h *Home) openNewSessionDialog() tea.Cmd {
+	// Reset any stale remote target from a previously abandoned flow.
+	h.pendingRemoteName = ""
+	// If the cursor is on a remote group/session, open the same
+	// new-session dialog as for local items but remember the remote
+	// target (#1353). The submit handler routes the create to the remote
+	// via SSH with the chosen tool, so the #743 invariant still holds:
+	// the session is never created on localhost. (Previously this
+	// quick-created a shell on the remote with no tool selection.)
+	if h.cursor >= 0 && h.cursor < len(h.flatItems) {
+		item := h.flatItems[h.cursor]
+		if item.Type == session.ItemTypeRemoteGroup || item.Type == session.ItemTypeRemoteSession {
+			return h.showRemoteNewSessionDialog(item)
+		}
+	}
+	return h.openLocalNewSessionDialog()
+}
+
+// openLocalNewSessionDialog opens the new-session dialog for this machine,
+// whatever the cursor is on. A remote cursor row falls back to the default
+// group. The Welcome uses it directly: it promises a local session.
+func (h *Home) openLocalNewSessionDialog() tea.Cmd {
+	h.pendingRemoteName = ""
+
+	// Collect unique project paths sorted by most recently accessed
+	type pathInfo struct {
+		path           string
+		lastAccessedAt time.Time
+	}
+	pathMap := make(map[string]*pathInfo)
+	for _, inst := range h.instances {
+		if inst.ProjectPath == "" {
+			continue
+		}
+		// Prefer the original repo root over worktree paths so suggestions
+		// don't show ephemeral worktree directories.
+		p := inst.ProjectPath
+		if inst.WorktreeRepoRoot != "" {
+			p = inst.WorktreeRepoRoot
+		}
+		existing, ok := pathMap[p]
+		if !ok {
+			// First time seeing this path.
+			accessTime := inst.GetLastAccessedAtThreadSafe()
+			if accessTime.IsZero() {
+				accessTime = inst.CreatedAt // Fall back to creation time.
+			}
+			pathMap[p] = &pathInfo{
+				path:           p,
+				lastAccessedAt: accessTime,
+			}
+		} else {
+			// Update if this instance was accessed more recently.
+			accessTime := inst.GetLastAccessedAtThreadSafe()
+			if accessTime.IsZero() {
+				accessTime = inst.CreatedAt
+			}
+			if accessTime.After(existing.lastAccessedAt) {
+				existing.lastAccessedAt = accessTime
+			}
+		}
+	}
+
+	// Convert to slice and sort by most recent first
+	pathInfos := make([]*pathInfo, 0, len(pathMap))
+	for _, info := range pathMap {
+		pathInfos = append(pathInfos, info)
+	}
+	sort.Slice(pathInfos, func(i, j int) bool {
+		return pathInfos[i].lastAccessedAt.After(pathInfos[j].lastAccessedAt)
+	})
+
+	// Extract sorted paths
+	paths := make([]string, len(pathInfos))
+	for i, info := range pathInfos {
+		paths[i] = info.path
+	}
+	h.newDialog.SetPathSuggestions(paths)
+
+	// Load recent sessions for the picker
+	if recents, err := h.storage.LoadRecentSessions(); err == nil {
+		h.newDialog.SetRecentSessions(recents)
+	}
+
+	// Apply the preselected tool: explicit [default_tool] config wins,
+	// otherwise fall back to the last successfully-submitted tool remembered
+	// in the profile StateDB (UX top-3 #2). First run (neither set) starts on
+	// the first installed agent, or the shell when none is installed
+	// (onboarding, ASK-211). The tool row lists installed tools first.
+	h.newDialog.restoreLocalPresets()
+	h.newDialog.RefreshInstalledTools()
+	h.newDialog.SetDefaultTool(initialNewSessionTool(session.GetDefaultTool(), rememberedTool(h.stateDB()), h.newDialog.FirstInstalledAgent()))
+
+	// Independent roots start in the configured default group regardless of
+	// cursor or scoped view. Group and parent remain separate explicit dialog
+	// choices, so browsing a persona cannot silently create its child.
+	groupPath := session.DefaultGroupPath
+	groupName := groupPath
+	if group, exists := h.groupTree.Groups[groupPath]; exists {
+		groupName = group.Name
+	}
+	defaultPath := h.getDefaultPathForGroup(groupPath)
+	conductors := h.activeConductorSessions()
+	// A new session is an independent root unless the user explicitly picks
+	// a parent in the dialog. Cursor position may choose its group, never its
+	// orchestration parent.
+	h.newDialog.ShowInGroup(groupPath, groupName, defaultPath, conductors, "")
+	h.newDialog.SetWhereChoices(newDialogWhereChoicesFromConfig())
+	// The Claude hooks question rides in the form while it is undecided
+	// (ASK-211); the old startup box no longer appears.
+	h.newDialog.SetClaudeHooksUndecided(h.pendingHooksPrompt)
+	// The profile's first session gets the short form (ASK-211): the model
+	// rows and the tool's options wait under "More options". So does every
+	// form while the hint bar runs: its step 3 ("Press n to start another
+	// session") opens the same short form the user just learned (round 2).
+	h.newDialog.SetFirstSession(!h.hasAnySession() || h.hints.step != hintStepOff)
+	return nil
 }

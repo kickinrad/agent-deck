@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"al.essio.dev/pkg/shellescape"
 
 	"github.com/asheshgoplani/agent-deck/internal/sandboxguard"
+	"github.com/asheshgoplani/agent-deck/internal/shellwords"
 )
 
 func (i *Instance) buildPiForkCommandForTarget(target *Instance, baseCommand string) (string, error) {
@@ -33,11 +35,12 @@ func (i *Instance) buildPiForkCommandForTarget(target *Instance, baseCommand str
 	quotedProfile := shellescape.Quote(sessionProfileEnvValue())
 
 	return envPrefix + fmt.Sprintf(
-		"parent_session_dir=%s; session_dir=%s; mkdir -p \"$session_dir\" && source_file=$(find \"$parent_session_dir\" -type f -name '*.jsonl' -exec ls -t {} + 2>/dev/null | head -n 1); if [ -z \"$source_file\" ]; then echo \"No Pi session file found in $parent_session_dir\" >&2; exit 1; fi; AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s %s --fork \"$source_file\" --session-dir \"$session_dir\"%s",
+		"parent_session_dir=%s; session_dir=%s; mkdir -p \"$session_dir\" && source_file=$(find \"$parent_session_dir\" -type f -name '*.jsonl' -exec ls -t {} + 2>/dev/null | head -n 1); if [ -z \"$source_file\" ]; then echo \"No Pi session file found in $parent_session_dir\" >&2; exit 1; fi; AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s %s%s --fork \"$source_file\" --session-dir \"$session_dir\"%s",
 		parentSessionDir,
 		sessionDir,
 		quotedInstanceID,
 		quotedProfile,
+		target.piSocketLaunchPrefix(cmd),
 		cmd,
 		target.piIdentityFlag(),
 	), nil
@@ -93,11 +96,34 @@ func (i *Instance) CanFork() bool {
 		return i.CanForkCodex()
 	}
 
-	// Claude sessions can fork if session ID is recent
+	// Claude sessions can fork if the session ID was detected recently, or if
+	// its transcript is on disk: a fork is `claude --resume <id>
+	// --fork-session`, which needs the transcript, not a fresh detection.
+	// #3032: a one-shot CLI never refreshes ClaudeDetectedAt for a session that
+	// already has an id, so the clock alone refused every session older than
+	// five minutes.
 	if i.ClaudeSessionID == "" {
 		return false
 	}
-	return time.Since(i.ClaudeDetectedAt) < 5*time.Minute
+	if time.Since(i.ClaudeDetectedAt) < 5*time.Minute {
+		return true
+	}
+	return i.claudeForkTranscriptOnDisk()
+}
+
+// claudeForkTranscriptOnDisk reports whether this session's Claude transcript
+// sits where the fork's `claude --resume` looks for it: the instance's own
+// config dir, under the project dir Claude derives from ProjectPath or
+// EffectiveWorkingDir. Only exact paths are stat'ed (no projects/* glob, no
+// global config-dir fallback): CanFork runs on TUI render and web snapshot
+// paths. Remote (--ssh) sessions have no local transcript, so the clock alone
+// still decides for them; non-Claude tools never get here with a Claude id
+// that matters.
+func (i *Instance) claudeForkTranscriptOnDisk() bool {
+	if !IsClaudeCompatible(i.Tool) || !i.TranscriptIsResolvableLocally() {
+		return false
+	}
+	return exactClaudeTranscriptPath(GetClaudeConfigDirForInstance(i), i.ProjectPath, i.ClaudeSessionID, i.EffectiveWorkingDir()) != ""
 }
 
 // CanForkPi returns true if this Pi session can be forked by Agent Deck.
@@ -185,13 +211,16 @@ func (i *Instance) buildClaudeForkCommandForTarget(target *Instance, opts *Claud
 
 	workDir := target.ProjectPath
 
-	// IMPORTANT: For capture-resume commands (which contain $(...) syntax), we MUST use
-	// "claude" binary + explicit env exports, NOT a custom command alias like "cdw".
+	// IMPORTANT: For capture-resume commands (which contain $(...) syntax), we MUST NOT
+	// exec a custom command alias like "cdw".
 	// Reason: Commands with $(...) get wrapped in `bash -c` for fish compatibility (#47),
-	// and shell aliases are not available in non-interactive bash shells. This always
-	// execs the literal "claude" binary below regardless of GetClaudeCommandForInstance,
-	// so the #1822 F3 custom-command gate does not apply here: pass false.
-	bashExportPrefix := target.buildBashExportPrefix(false)
+	// and shell aliases are not available in non-interactive bash shells. A configured
+	// command that is a real executable (an absolute wrapper path, or a command line
+	// whose first word is on PATH) works under `bash -c`, so it is honoured like a fresh
+	// start; anything else falls back to the literal "claude" binary. The #1822 F3
+	// custom-command gate then applies exactly as in buildClaudeCommandWithMessage.
+	claudeCmd := forkClaudeCommand(target)
+	bashExportPrefix := target.buildBashExportPrefix(claudeCmd != "claude")
 
 	// If no options provided, use defaults from config
 	if opts == nil {
@@ -201,7 +230,7 @@ func (i *Instance) buildClaudeForkCommandForTarget(target *Instance, opts *Claud
 
 	// Build extra flags from options (for fork, we use ToArgsForFork which excludes session mode)
 	launchName := target.ClaudeLaunchName()
-	if extraArgsSupplyName(i.ExtraArgs) || extraArgsSelectSession(i.ExtraArgs) {
+	if extraArgsSupplyName(i.ExtraArgs) || extraArgsSelectSession(i.claudeExtraArgsForCommand()) {
 		launchName = ""
 	}
 	extraFlags := i.buildClaudeExtraFlagsWithName(opts, launchName)
@@ -237,15 +266,65 @@ func (i *Instance) buildClaudeForkCommandForTarget(target *Instance, opts *Claud
 	// ordinary paths; shellescape leaves an ordinary id bare.
 	cmd := fmt.Sprintf(
 		`cd %s && `+
-			`%sexec claude --session-id "%s" --resume %s --fork-session%s`,
+			`%sexec %s --session-id "%s" --resume %s --fork-session%s`,
 		shellQuote(workDir),
-		bashExportPrefix, forkUUID, shellescape.Quote(i.ClaudeSessionID), extraFlags)
+		bashExportPrefix, claudeCmd, forkUUID, shellescape.Quote(i.ClaudeSessionID), extraFlags)
 	cmd, err := i.applyWrapper(cmd)
 	if err != nil {
 		return "", err
 	}
 
 	return cmd, nil
+}
+
+// forkClaudeCommand returns the Claude command a fork of target execs: the
+// command GetClaudeCommandForInstance resolves when its first word (after any
+// VAR=value prefixes) is an executable, else the literal "claude". An alias
+// such as "cdw" does not exist in the non-interactive `bash -c` the fork runs
+// under. An SSH or sandboxed target runs the command elsewhere, where a local
+// lookup says nothing, so it keeps "claude".
+//
+// The lookup runs in agent-deck's own environment and working directory, not
+// the pane's: the fork runs after `cd <workdir>`, and env_file and
+// [shell].env_files can change its PATH. A relative path such as
+// ./bin/wrapper is therefore checked against agent-deck's cwd. A command only
+// the pane's PATH provides falls back to "claude", and one only agent-deck's
+// PATH provides is not found when the pane runs it.
+//
+// A command with leading assignments is returned behind `env`: it is spliced
+// after `exec`, and `exec FLAG=1 wrapper` makes bash look for a program named
+// "FLAG=1". `exec env FLAG=1 wrapper` sets the variables and runs the wrapper,
+// the same shape a fresh start's `exec env -u TELEGRAM_* <command>` takes.
+func forkClaudeCommand(target *Instance) string {
+	if target.identityRunsElsewhere() {
+		return "claude"
+	}
+	cmd := GetClaudeCommandForInstance(target)
+	if cmd == "claude" {
+		return cmd
+	}
+	words, ok := shellwords.Split(cmd)
+	if !ok {
+		return "claude"
+	}
+	// isShellEnvAssignment, not stripLeadingEnvAssignments: the hook helper
+	// refuses any word containing a path separator, so it would leave
+	// CLAUDE_CONFIG_DIR=/tmp/account in command position.
+	assignments := 0
+	for assignments < len(words) && isShellEnvAssignment(words[assignments]) {
+		assignments++
+	}
+	words = words[assignments:]
+	if len(words) == 0 {
+		return "claude"
+	}
+	if _, err := exec.LookPath(words[0]); err != nil {
+		return "claude"
+	}
+	if assignments > 0 {
+		return "env " + cmd
+	}
+	return cmd
 }
 
 // GetActualWorkDir returns the actual working directory from tmux, or falls back to ProjectPath
@@ -338,8 +417,10 @@ func (i *Instance) createForkedClaudeInstance(
 	// (buildClaudeResumeCommand reads the fork's own ExtraArgs) and a
 	// fork-of-a-fork never sees them at all. Mirrors how ClaudeOptions are
 	// persisted via SetClaudeOptions further down. Copied, not aliased.
-	if len(i.ExtraArgs) > 0 {
-		forked.ExtraArgs = append([]string(nil), i.ExtraArgs...)
+	// Never the parent's session selectors (a stale fork pair would
+	// make the fork's own restarts fork the grandparent).
+	if args := i.claudeExtraArgsForCommand(); len(args) > 0 {
+		forked.ExtraArgs = append([]string(nil), args...)
 	}
 
 	// The parent is set before the one-shot command is baked: the launch env
@@ -467,6 +548,22 @@ func (i *Instance) CreateForkedPiInstanceWithOptions(
 	}
 
 	return forked, cmd, nil
+}
+
+// RebuildPiForkCommand recomputes forked's start command after the caller changed
+// what a launch exports (a fork given a sandbox after it was created): a sandboxed
+// pi never exports the host socket, and the flag is recorded false.
+func (i *Instance) RebuildPiForkCommand(forked *Instance) error {
+	baseCommand := strings.TrimSpace(i.Command)
+	if baseCommand == "" {
+		baseCommand = "pi"
+	}
+	cmd, err := i.buildPiForkCommandForTarget(forked, baseCommand)
+	if err != nil {
+		return err
+	}
+	forked.ForkStartCommand = cmd
+	return nil
 }
 
 // CanForkCodex reports whether this Codex session can be forked. Forkability

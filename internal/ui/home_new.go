@@ -22,6 +22,7 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/statedb"
 	"github.com/asheshgoplani/agent-deck/internal/sysinfo"
 	"github.com/asheshgoplani/agent-deck/internal/tmux"
+	"github.com/asheshgoplani/agent-deck/internal/voicestate"
 )
 
 func newNotesEditor() textarea.Model {
@@ -180,6 +181,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		editSessionDialog:         NewEditSessionDialog(),
 		skillDialog:               NewSkillDialog(),
 		setupWizard:               NewSetupWizard(),
+		onboarding:                NewOnboardingOverlay(),
 		settingsPanel:             NewSettingsPanel(),
 		analyticsPanel:            NewAnalyticsPanel(),
 		geminiModelDialog:         NewGeminiModelDialog(),
@@ -193,6 +195,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		feedbackDialog:            NewFeedbackDialog(),
 		askDialog:                 NewAskDialog(actualProfile),
 		reportDialog:              NewReportDialog(),
+		whatsNewDialog:            NewWhatsNewDialog(),
 		telemetryDialog:           NewTelemetryDialog(),
 		zoxidePicker:              NewZoxidePicker(),
 		feedbackSender:            feedback.NewSender(),
@@ -200,6 +203,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		agentsPanel:               NewAgentsPanel(),
 		deadLetterPanel:           NewDeadLetterPanel(),
 		triggersFeed:              stateDBTriggersFeed{},
+		voiceReader:               voicestate.NewReader(voicestate.DefaultDir()),
 		toolVisibilityPanel:       NewToolVisibilityPanel(),
 		insertBatchDuration:       defaultInsertBatchDuration,
 		insertOpenKeySender:       defaultInsertOpenKeySender,
@@ -257,6 +261,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		mru:                       session.NewMRUHistory(session.DefaultMRUCapacity),
 	}
 	h.sessionRenderSnapshot.Store(make(map[string]sessionRenderState))
+	h.newDialog.titleTaken = h.newSessionTitleTaken
 
 	h.reloadHotkeysFromConfig()
 
@@ -349,6 +354,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 	if notifSettings.GetEnabled() && h.manageTmuxNotifications {
 		h.notificationsEnabled = true
 		h.notificationManager = session.NewNotificationManager(notifSettings.MaxShown, notifSettings.ShowAll, notifSettings.Minimal)
+		h.notificationManager.SetSortMode(notifSettings.GetSort())
 
 		// Initialize tmux status bar options for proper notification display
 		// Fixes truncation (default status-left-length is only 10 chars)
@@ -455,6 +461,9 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		if db := statedb.GetGlobal(); db != nil {
 			prompted, _ = db.GetMeta("hooks_prompted")
 		}
+		// The hooks live in Claude's own settings, shared by every
+		// profile: another profile's answer counts (ASK-211 review).
+		prompted = claudeHooksPrompted(prompted)
 		decision := claudeHooksStartupDecision(
 			session.CheckClaudeHooksPresent(configDir),
 			session.CheckClaudeHooksInstalled(configDir),

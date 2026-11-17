@@ -1,4 +1,4 @@
-.PHONY: bench-fleet bench-ops build run install install-user uninstall uninstall-user clean dev release-ready release-local dist-local test test-perf bench fmt lint ci css tools css-verify test-web test-web-unit test-web-e2e test-web-install goldens-update verify-docker
+.PHONY: bench-fleet bench-ops build run install install-user uninstall uninstall-user clean dev release-ready changelog-release release-local dist-local test test-perf bench fmt lint ci css tools css-verify test-web test-web-unit test-web-e2e test-web-install goldens-update verify-docker
 
 BINARY_NAME=agent-deck
 BUILD_DIR=./build
@@ -12,7 +12,7 @@ GOLANGCI_LINT_VERSION=v2.14.0
 TAILWIND_BIN=$(HOME)/.local/bin/tailwindcss
 
 # Keep local and CI builds on the version required by go.mod.
-export GOTOOLCHAIN=go1.26.10
+export GOTOOLCHAIN=go1.26.11
 
 # Build the binary (requires compiled CSS via `make css`)
 build: css
@@ -63,7 +63,7 @@ css: tools
 	@echo "==> Brute-force globbing diff (Pitfall #1 gate)"
 	@trap 'rm -f ./internal/web/static/.brute-tw.src.css' EXIT INT TERM; \
 	cp ./internal/web/static/styles.src.css ./internal/web/static/.brute-tw.src.css; \
-	printf '\n/* --- brute-force additional @source (Pitfall #1 gate) --- */\n@source "./**/*.{js,mjs,html}";\n@source not "./vendor/**";\n@source not "./chart.umd.min.js";\n@source not "./sw.js";\n' \
+	printf '\n/* --- brute-force additional @source (Pitfall #1 gate) --- */\n@source "./**/*.{js,mjs,html}";\n@source not "./vendor/**";\n@source not "./chart.umd.min.js";\n@source not "./sw.js";\n@source not "./connect.html";\n@source not "./connect.js";\n' \
 		>> ./internal/web/static/.brute-tw.src.css; \
 	$(TAILWIND_BIN) -i ./internal/web/static/.brute-tw.src.css \
 		-o /tmp/agent-deck-tw-brute.css \
@@ -140,7 +140,7 @@ dev:
 
 # Run tests (with race detector)
 test:
-	go test -race -v ./...
+	go test -race -timeout 20m -v ./...
 
 # Regenerate the CLI/storage-bytes behaviour-freeze goldens under
 # cmd/agent-deck/testdata/goldens/ after a reviewed, intended behaviour
@@ -204,6 +204,13 @@ ci:
 release-ready:
 	./scripts/release-readiness.sh $(READY_ARGS)
 
+# Move CHANGELOG.md's Unreleased lines under the release heading, e.g.
+# make changelog-release VERSION=1.16.39 (optional DATE=YYYY-MM-DD, default
+# today in Europe/Berlin). release-ready refuses a Version without a heading.
+changelog-release:
+	@if [ "$(origin VERSION)" != "command line" ]; then echo "usage: make changelog-release VERSION=X.Y.Z [DATE=YYYY-MM-DD]"; exit 2; fi
+	./scripts/changelog-release.sh $(VERSION) $(DATE)
+
 # Local release using GoReleaser
 # Prerequisites: brew install goreleaser
 # Required env: GITHUB_TOKEN
@@ -213,18 +220,18 @@ release-ready:
 # tap at all.
 release-local:
 	@echo "=== Pre-flight checks ==="
-	@which goreleaser > /dev/null || (echo "ERROR: goreleaser not found. Run: brew install goreleaser" && exit 1)
+	@goreleaser --version > /dev/null 2>&1 || (echo "ERROR: goreleaser not runnable. Run: mise use -g goreleaser@latest" && exit 1)
 	@test -n "$$GITHUB_TOKEN" || (echo "ERROR: GITHUB_TOKEN not set" && exit 1)
 	@TAG=$$(git describe --tags --exact-match 2>/dev/null) || (echo "ERROR: HEAD is not tagged. Run: git tag vX.Y.Z" && exit 1); \
 	CODE_VERSION=$$(grep 'var Version' cmd/agent-deck/main.go | sed 's/.*"\(.*\)".*/\1/'); \
 	TAG_VERSION=$${TAG#v}; \
-	if [ "$$TAG_VERSION" != "$$CODE_VERSION" ]; then \
-		echo "ERROR: Tag $$TAG ($$TAG_VERSION) != code Version $$CODE_VERSION"; \
-		exit 1; \
-	fi; \
-	echo "Version: $$CODE_VERSION"
-	@echo "=== Running tests ==="
-	go test -race ./...
+	case "$$TAG_VERSION" in \
+		"$$CODE_VERSION"-kickinrad.[0-9]*) ;; \
+		*) echo "ERROR: Tag $$TAG is not v$$CODE_VERSION-kickinrad.<n> (fork tags ship on an unmodified upstream Version)"; exit 1 ;; \
+	esac; \
+	echo "Version: $$TAG_VERSION"
+	@echo "=== Running tests (in Docker: tests never run on the host) ==="
+	$(MAKE) verify-docker
 	@echo "=== Running GoReleaser ==="
 	goreleaser release --clean
 	@echo "=== Draft release built ==="
@@ -232,8 +239,8 @@ release-local:
 	@echo "Verify the assets, then publish it yourself — CI's publish step does not run for a local release:"
 	@echo "  gh release view $$(git describe --tags --exact-match) --repo kickinrad/agent-deck"
 	@echo "  gh release edit $$(git describe --tags --exact-match) --repo kickinrad/agent-deck --draft=false --latest=false"
-	@echo "Note: no SLSA provenance and no Homebrew tap update happen for a local release —"
-	@echo "both live in .github/workflows/release.yml. Prefer pushing the tag and letting CI do it."
+	@echo "Note: no SLSA provenance happens for a local release; it lives in"
+	@echo ".github/workflows/release.yml. Prefer pushing the tag and letting CI do it."
 
 # Web UI test targets
 # Vitest (unit) + Playwright (e2e + screenshot regression). Both run against
@@ -265,12 +272,12 @@ dist-local:
 	go run ./tools/dist-local -version "$(DIST_VERSION)" -output "$(DIST_OUTPUT)"
 
 # Functional checks run in Docker locally. Native execution is CI-only.
-FUNCCHECK_IMAGE ?= agentdeck-funccheck:go1.26.10
+FUNCCHECK_IMAGE ?= agentdeck-funccheck:go1.26.11
 FUNCCHECK_BINARY ?=
 FUNCCHECK_MODE ?= docker
 .PHONY: check-functional funccheck-image
 funccheck-image:
-	@printf '%s\n' 'FROM golang:1.26.10-bookworm' \
+	@printf '%s\n' 'FROM golang:1.26.11-bookworm' \
 		'RUN apt-get update -qq && apt-get install -y --no-install-recommends tmux git' \
 		'WORKDIR /deps' 'COPY go.mod go.sum ./' \
 		'RUN go mod download && chmod -R a+rX /go/pkg/mod' \

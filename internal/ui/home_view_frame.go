@@ -56,6 +56,7 @@ func (h *Home) contentChromeTop() int {
 	if h.maintenanceMsg != "" {
 		top++
 	}
+	top += h.sandboxStatusHeight()
 	return top
 }
 
@@ -82,11 +83,12 @@ func (h *Home) stackedPreviewTopY() int {
 	if h.maintenanceMsg != "" {
 		maintenanceBannerHeight = 1
 	}
+	sandboxStatusHeight := h.sandboxStatusHeight()
 	debugBarHeight := 0
 	if h.debugMode {
 		debugBarHeight = 1
 	}
-	contentHeight := h.height - 1 - helpBarHeight - updateBannerHeight - maintenanceBannerHeight - filterBarHeight - debugBarHeight - h.promptInputDialog.ReservedHeight()
+	contentHeight := h.height - 1 - helpBarHeight - updateBannerHeight - maintenanceBannerHeight - sandboxStatusHeight - filterBarHeight - debugBarHeight - h.promptInputDialog.ReservedHeight() - h.hintBarHeight()
 	listHeight := h.stackedListHeight(contentHeight)
 	// content top + full list block (title + body) + the 1-row separator.
 	return h.contentChromeTop() + listHeight + 1
@@ -119,7 +121,7 @@ func (h *Home) renderHeaderSSHSegments(now time.Time) (full, compact string) {
 	return full, style.Render(renderSSHSummaryLine(sessions))
 }
 
-// countSessionStatuses counts sessions by status for the logo display
+// countSessionStatuses counts sessions by status for the header stats
 // Uses cache to avoid O(n) iteration on every View() call
 // Cache expires after 500ms to balance freshness with performance
 // PERFORMANCE: Increased from 100ms to 500ms - status changes are rare
@@ -184,6 +186,9 @@ func (h *Home) countSessionStatuses() (running, waiting, idle, stopped, errored 
 		age, known := h.remoteRowAgeLocked(name)
 		stale := known && age >= remoteRowStaleAge
 		for _, rs := range sessions {
+			if rs.Archived {
+				continue
+			}
 			switch statusBucket(session.Status(rs.Status)) {
 			case session.StatusRunning:
 				if stale {
@@ -446,12 +451,27 @@ func (h *Home) updateSizes() {
 		h.feedbackDialog.SetSize(h.width, h.height)
 	}
 	h.reportDialog.SetSize(h.width, h.height)
+	h.whatsNewDialog.SetSize(h.width, h.height)
 	if h.telemetryDialog != nil {
 		h.telemetryDialog.SetSize(h.width, h.height)
 	}
 }
 
+// resetScrollRegion (DECSTBM with no parameters) gives the scroll region back
+// the whole screen and homes the cursor. An attached tmux client scrolls a
+// pane by setting a region on the outer terminal and leaves it set; a Ctrl+Q
+// detach closes its PTY before tmux's reset on exit is written, so the region
+// survives into the deck and every frame's line feeds scroll only that band:
+// rows climb, stale copies stay, the rows below are never drawn (ASK-140).
+// Every frame starts with it: Bubble Tea writes row 0 right after homing the
+// cursor, so the reset moves nothing, and every full repaint (start, resize,
+// return from an attach) heals a leaked region.
+const resetScrollRegion = "\x1b[r"
+
 // View renders the UI
+// headerSysStatsSnapshot reads the header's host stats (a seam for tests).
+var headerSysStatsSnapshot = func(c *sysinfo.Collector) sysinfo.Stats { return c.Get() }
+
 func (h *Home) View() string {
 	// CRITICAL: Do not render fresh output during attach (Bubble Tea Issue #431
 	// - View gets printed to stdout during tea.Exec). Historically this
@@ -472,10 +492,8 @@ func (h *Home) View() string {
 		return h.lastRenderedFrame
 	}
 
-	frame := h.renderFrame()
-	if frame != "" {
-		h.lastRenderedFrame = frame
-	}
+	frame := resetScrollRegion + h.renderFrame()
+	h.lastRenderedFrame = frame
 	if h.pendingFrameOp != "" && h.width > 0 && !h.initialLoading {
 		optiming.Since(h.pendingFrameOp, h.pendingFrameStart)
 		h.pendingFrameOp = ""
@@ -539,6 +557,9 @@ func (h *Home) renderFrame() string {
 	// Setup wizard takes over entire screen
 	if h.setupWizard.IsVisible() {
 		return h.setupWizard.View()
+	}
+	if h.onboarding.IsVisible() {
+		return h.onboarding.View()
 	}
 
 	// Delivery and watcher panels are modal (before settings panel)
@@ -622,6 +643,9 @@ func (h *Home) renderFrame() string {
 	if h.reportDialog.IsVisible() {
 		return h.reportDialog.View()
 	}
+	if h.whatsNewDialog.IsVisible() {
+		return h.whatsNewDialog.View()
+	}
 	if h.feedbackDialog.IsVisible() {
 		return h.feedbackDialog.View()
 	}
@@ -643,9 +667,10 @@ func (h *Home) renderFrame() string {
 	// ═══════════════════════════════════════════════════════════════════
 	// HEADER BAR
 	// ═══════════════════════════════════════════════════════════════════
-	// Calculate real session status counts for logo and stats
+	// Calculate real session status counts for the stats segment
 	running, waiting, idle, stopped, errored := h.countSessionStatuses()
-	logo := RenderLogoCompact(running, waiting, idle)
+	// The agent-deck mark leads the header: "●●○ Agent Deck".
+	logo := RenderBrandMark()
 
 	titleStyle := lipgloss.NewStyle().
 		Bold(true).
@@ -775,8 +800,11 @@ func (h *Home) renderFrame() string {
 	// still governs which of those sysinfo.Format actually renders.
 	var sysStatsSegment string
 	headerWantsHostStats := headerFieldSet[session.PreviewFieldLoad] || headerFieldSet[session.PreviewFieldMemory] || headerFieldSet[session.PreviewFieldDisk]
-	if headerWantsHostStats && h.sysStatsCollector != nil {
-		sysStats := h.sysStatsCollector.Get()
+	// Hidden until a session exists (ASK-211): on the welcome they are
+	// numbers a new user has no use for yet.
+	welcome := h.welcomeActive()
+	if headerWantsHostStats && h.sysStatsCollector != nil && !welcome {
+		sysStats := headerSysStatsSnapshot(h.sysStatsCollector)
 		if formatted := sysinfo.Format(sysStats, h.sysStatsConfig.GetFormat(), h.sysStatsConfig.GetShow()); formatted != "" {
 			sysStatsSegment = lipgloss.NewStyle().Foreground(ColorComment).Render(formatted)
 		}
@@ -903,6 +931,18 @@ func (h *Home) renderFrame() string {
 	}
 
 	// ═══════════════════════════════════════════════════════════════════
+	// SANDBOX STATUS (a sandbox create or destroy in flight, or just done).
+	// Above the list, with its height reserved: the footer error line
+	// below the help bar is auto-dismissed after 5 s.
+	// ═══════════════════════════════════════════════════════════════════
+	sandboxStatusLines := h.sandboxStatusLines(time.Now())
+	sandboxStatusHeight := len(sandboxStatusLines)
+	for _, line := range sandboxStatusLines {
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+
+	// ═══════════════════════════════════════════════════════════════════
 	// MAIN CONTENT AREA - Responsive layout based on terminal width
 	// ═══════════════════════════════════════════════════════════════════
 	helpBarHeight := 2 // Help bar takes 2 lines (border + content)
@@ -910,11 +950,21 @@ func (h *Home) renderFrame() string {
 	if h.debugMode {
 		debugBarHeight = 1
 	}
-	// Height breakdown: -1 header, -filterBarHeight filter, -updateBannerHeight banner, -maintenanceBannerHeight maintenance, -helpBarHeight help, -debugBarHeight debug
-	contentHeight := h.height - 1 - helpBarHeight - updateBannerHeight - maintenanceBannerHeight - filterBarHeight - debugBarHeight - h.promptInputDialog.ReservedHeight()
+	// The footer error line under the help bar gets its row too, or the
+	// final clamp cuts it off a full frame: it was set and logged but
+	// never on screen, so a close notice ("R to restart") or a create's
+	// setup warning was missed.
+	footerErrorHeight := 0
+	if h.err != nil && !h.sessionRefToastActive() {
+		footerErrorHeight = 1
+	}
+	// Height breakdown: -1 header, -filterBarHeight filter, -updateBannerHeight banner, -maintenanceBannerHeight maintenance, -helpBarHeight help, -debugBarHeight debug, -footerErrorHeight error
+	contentHeight := h.height - 1 - helpBarHeight - updateBannerHeight - maintenanceBannerHeight - sandboxStatusHeight - filterBarHeight - debugBarHeight - h.promptInputDialog.ReservedHeight() - h.hintBarHeight() - footerErrorHeight
 
 	var mainContent string
-	if h.embeddedMode && h.embeddedSidebarHidden {
+	if welcome {
+		mainContent = h.renderWelcome(h.width, contentHeight)
+	} else if h.embeddedMode && h.embeddedSidebarHidden {
 		mainContent = h.renderEmbeddedOnlyLayout(contentHeight)
 	} else {
 		// Route to appropriate layout based on terminal width.
@@ -934,6 +984,11 @@ func (h *Home) renderFrame() string {
 	b.WriteString("\n")
 	if h.promptInputDialog.IsVisible() {
 		b.WriteString(h.promptInputDialog.Bar())
+		b.WriteString("\n")
+	}
+	// The onboarding hint bar sits right above the footer (ASK-211).
+	if h.hintBarVisible() {
+		b.WriteString(h.renderHintBar())
 		b.WriteString("\n")
 	}
 
@@ -1053,95 +1108,33 @@ func (h *Home) renderPanelTitle(title string, width int) string {
 	return titleStyle.Render(title) + "\n" + underline
 }
 
-// renderLoadingSplash creates a simple centered loading splash screen
-// Shows the three status indicators (running/waiting/idle) cycling
+// splashMark renders the agent-deck mark for a splash frame. The dots light
+// in turn (running, waiting, idle), then all together: the full mark.
+func splashMark(frame int) string {
+	switch (frame / 2) % 4 {
+	case 0:
+		return renderBrandMarkLit(true, false, false)
+	case 1:
+		return renderBrandMarkLit(false, true, false)
+	case 2:
+		return renderBrandMarkLit(false, false, true)
+	default:
+		return RenderBrandMark()
+	}
+}
+
+// renderLoadingSplash creates a simple centered loading splash screen:
+// the agent-deck mark and name ("●●○ Agent Deck"), its dots lighting in
+// turn while sessions load.
 func renderLoadingSplash(width, height int, frame int) string {
-	// Status indicator cycle: each status lights up in sequence
-	// Frame 0-1: Running (green ●)
-	// Frame 2-3: Waiting (yellow ◐)
-	// Frame 4-5: Idle (gray ○)
-	// Frame 6-7: All lit together
-
-	phase := (frame / 2) % 4
-
-	// Active status colors (match the actual TUI colors)
-	greenStyle := lipgloss.NewStyle().Foreground(ColorGreen).Bold(true)
-	yellowStyle := lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
-	grayStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
-
-	// Dim style for inactive indicators
-	dimStyle := lipgloss.NewStyle().Foreground(ColorComment)
-
-	// Text styles
 	titleStyle := lipgloss.NewStyle().Foreground(ColorText).Bold(true)
 	subtitleStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
 
-	var content strings.Builder
-
+	subtitle := "Loading..."
 	if width >= 40 && height >= 10 {
-		// Full version - big status indicators in a row
-		var running, waiting, idle string
-
-		switch phase {
-		case 0: // Running highlighted
-			running = greenStyle.Render("●")
-			waiting = dimStyle.Render("◐")
-			idle = dimStyle.Render("○")
-		case 1: // Waiting highlighted
-			running = dimStyle.Render("●")
-			waiting = yellowStyle.Render("◐")
-			idle = dimStyle.Render("○")
-		case 2: // Idle highlighted
-			running = dimStyle.Render("●")
-			waiting = dimStyle.Render("◐")
-			idle = grayStyle.Render("○")
-		case 3: // All lit
-			running = greenStyle.Render("●")
-			waiting = yellowStyle.Render("◐")
-			idle = grayStyle.Render("○")
-		}
-
-		content.WriteString("\n")
-		content.WriteString("      " + running + "   " + waiting + "   " + idle + "      \n")
-		content.WriteString("\n")
-		content.WriteString(titleStyle.Render("Agent Deck") + "\n")
-		content.WriteString("\n")
-		content.WriteString(subtitleStyle.Render("Loading sessions..."))
-	} else if width >= 25 && height >= 6 {
-		// Compact version
-		var indicators string
-		switch phase {
-		case 0:
-			indicators = greenStyle.Render("●") + " " + dimStyle.Render("◐") + " " + dimStyle.Render("○")
-		case 1:
-			indicators = dimStyle.Render("●") + " " + yellowStyle.Render("◐") + " " + dimStyle.Render("○")
-		case 2:
-			indicators = dimStyle.Render("●") + " " + dimStyle.Render("◐") + " " + grayStyle.Render("○")
-		case 3:
-			indicators = greenStyle.Render("●") + " " + yellowStyle.Render("◐") + " " + grayStyle.Render("○")
-		}
-		content.WriteString(indicators + "\n")
-		content.WriteString("\n")
-		content.WriteString(titleStyle.Render("Agent Deck") + "\n")
-		content.WriteString(subtitleStyle.Render("Loading..."))
-	} else {
-		// Minimal
-		content.WriteString(greenStyle.Render("●") + " " + titleStyle.Render("Agent Deck") + "\n")
-		content.WriteString(subtitleStyle.Render("Loading..."))
+		subtitle = "Loading sessions..."
 	}
-
-	// Center the content
-	contentStyle := lipgloss.NewStyle().
-		Align(lipgloss.Center).
-		Width(width)
-
-	rendered := lipgloss.Place(
-		width, height,
-		lipgloss.Center, lipgloss.Center,
-		contentStyle.Render(content.String()),
-	)
-
-	return rendered
+	return renderSplash(width, height, splashMark(frame)+" "+titleStyle.Render("Agent Deck"), subtitleStyle.Render(subtitle))
 }
 
 // renderQuittingSplash renders a splash screen during application shutdown
@@ -1151,54 +1144,18 @@ func renderQuittingSplash(width, height int, frame int) string {
 
 // renderShutdownSplash draws the quit/restart splash with the given subtitle.
 func renderShutdownSplash(width, height int, frame int, subtitle string) string {
-	// Status indicator cycle (matches loading splash for consistency)
-	phase := (frame / 2) % 4
-
-	// Active status colors
-	greenStyle := lipgloss.NewStyle().Foreground(ColorGreen).Bold(true)
-	yellowStyle := lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
-	grayStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
-	dimStyle := lipgloss.NewStyle().Foreground(ColorComment)
-
-	// Text styles
 	titleStyle := lipgloss.NewStyle().Foreground(ColorText).Bold(true)
 	subtitleStyle := lipgloss.NewStyle().Foreground(ColorYellow)
+	return renderSplash(width, height, splashMark(frame)+" "+titleStyle.Render("Agent Deck"), subtitleStyle.Render(subtitle))
+}
 
-	var content strings.Builder
-
-	if width >= 40 && height >= 10 {
-		var running, waiting, idle string
-		switch phase {
-		case 0:
-			running = greenStyle.Render("●")
-			waiting = dimStyle.Render("◐")
-			idle = dimStyle.Render("○")
-		case 1:
-			running = dimStyle.Render("●")
-			waiting = yellowStyle.Render("◐")
-			idle = dimStyle.Render("○")
-		case 2:
-			running = dimStyle.Render("●")
-			waiting = dimStyle.Render("◐")
-			idle = grayStyle.Render("○")
-		case 3:
-			running = greenStyle.Render("●")
-			waiting = yellowStyle.Render("◐")
-			idle = grayStyle.Render("○")
-		}
-
-		content.WriteString("\n")
-		content.WriteString("      " + running + "   " + waiting + "   " + idle + "      \n")
-		content.WriteString("\n")
-		content.WriteString(titleStyle.Render("Agent Deck") + "\n")
-		content.WriteString("\n")
-		content.WriteString(subtitleStyle.Render(subtitle))
-	} else {
-		// Compact/Minimal
-		content.WriteString(titleStyle.Render("Agent Deck") + "\n")
-		content.WriteString(subtitleStyle.Render(subtitle))
+// renderSplash centres the brand line and a subtitle in width x height,
+// with a blank line between them when there is room.
+func renderSplash(width, height int, brand, subtitle string) string {
+	content := brand + "\n" + subtitle
+	if height >= 6 {
+		content = brand + "\n\n" + subtitle
 	}
-
 	contentStyle := lipgloss.NewStyle().
 		Align(lipgloss.Center).
 		Width(width)
@@ -1206,7 +1163,7 @@ func renderShutdownSplash(width, height int, frame int, subtitle string) string 
 	return lipgloss.Place(
 		width, height,
 		lipgloss.Center, lipgloss.Center,
-		contentStyle.Render(content.String()),
+		contentStyle.Render(content),
 	)
 }
 
