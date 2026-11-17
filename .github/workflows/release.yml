@@ -231,13 +231,13 @@ jobs:
     # Any failed, cancelled or missing gate leaves the release unbuilt.
     if: >-
       ${{ !cancelled()
+      && github.repository == 'kickinrad/agent-deck'
       && needs.ref-check.result == 'success'
       && needs.eval.result == 'success'
       && ((needs.reuse.result == 'success' && needs.reuse.outputs.reuse == 'true' && needs.tests.result == 'skipped')
           || needs.tests.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    if: github.repository == 'kickinrad/agent-deck'
     # Tag-push runs use the pushed tag; manual dispatch supplies it explicitly.
     env:
       REF_NAME: ${{ inputs.tag || github.ref_name }}
