@@ -223,7 +223,7 @@ release-local:
 	@goreleaser --version > /dev/null 2>&1 || (echo "ERROR: goreleaser not runnable. Run: mise use -g goreleaser@latest" && exit 1)
 	@test -n "$$GITHUB_TOKEN" || (echo "ERROR: GITHUB_TOKEN not set" && exit 1)
 	@TAG=$$(git describe --tags --exact-match 2>/dev/null) || (echo "ERROR: HEAD is not tagged. Run: git tag vX.Y.Z" && exit 1); \
-	CODE_VERSION=$$(grep 'var Version' cmd/agent-deck/main.go | sed 's/.*"\(.*\)".*/\1/'); \
+	CODE_VERSION=$$(grep '^var Version' cmd/agent-deck/main.go | head -1 | sed 's/.*= "\([^"]*\)".*/\1/'); \
 	TAG_VERSION=$${TAG#v}; \
 	case "$$TAG_VERSION" in \
 		"$$CODE_VERSION"-kickinrad.[0-9]*) ;; \
